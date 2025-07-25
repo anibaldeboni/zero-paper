@@ -2,29 +2,57 @@ package openweather
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 )
 
 const (
-	OpenWeatherUrl  = "https://api.openweathermap.org/data/3.0"
-	MeasurementPath = "/measurements"
+	defaultBaseURL  = "https://api.openweathermap.org/data/3.0"
+	measurementPath = "/measurements"
+	defaultTimeout  = 30 * time.Second
 )
 
+// Erros customizados
+var (
+	ErrInvalidAppID     = errors.New("invalid app ID")
+	ErrInvalidStationID = errors.New("invalid station ID")
+	ErrInvalidLimit     = errors.New("limit must be greater than 0")
+	ErrInvalidTimeRange = errors.New("from time must be before to time")
+)
+
+// AggregationType representa os tipos de agregação disponíveis
 type AggregationType string
 
+// String implementa a interface Stringer
 func (a AggregationType) String() string {
 	return string(a)
 }
 
+// Validate verifica se o tipo de agregação é válido
+func (a AggregationType) Validate() error {
+	switch a {
+	case Minute, Hour, Day:
+		return nil
+	default:
+		return fmt.Errorf("invalid aggregation type: %s", a)
+	}
+}
+
+// Tipos de agregação suportados
 const (
-	Minute AggregationType = "m"
-	Hour   AggregationType = "h"
-	Day    AggregationType = "d"
+	Minute AggregationType = "m" // Agregação por minuto
+	Hour   AggregationType = "h" // Agregação por hora
+	Day    AggregationType = "d" // Agregação por dia
 )
 
+// Measurement representa uma medição meteorológica individual
 type Measurement struct {
 	StationID   string   `json:"station_id"`
 	Dt          int64    `json:"dt"`
@@ -37,10 +65,23 @@ type Measurement struct {
 	Clouds      []Clouds `json:"clouds"`
 }
 
+// Validate verifica se a medição é válida
+func (m *Measurement) Validate() error {
+	if m.StationID == "" {
+		return ErrInvalidStationID
+	}
+	if m.Dt <= 0 {
+		return errors.New("invalid timestamp")
+	}
+	return nil
+}
+
+// Clouds representa informações sobre nuvens
 type Clouds struct {
 	Condition string `json:"condition"`
 }
 
+// MeasurementResponse representa a resposta da API para consultas de medições
 type MeasurementResponse struct {
 	Type          string        `json:"type"`
 	Date          int64         `json:"date"`
@@ -52,6 +93,7 @@ type MeasurementResponse struct {
 	Precipitation Precipitation `json:"precipitation"`
 }
 
+// Temperature representa dados de temperatura agregados
 type Temperature struct {
 	Max     *float64 `json:"max,omitempty"`
 	Min     *float64 `json:"min,omitempty"`
@@ -59,16 +101,19 @@ type Temperature struct {
 	Weight  *int     `json:"weight,omitempty"`
 }
 
+// Humidity representa dados de umidade agregados
 type Humidity struct {
 	Average *float64 `json:"average,omitempty"`
 	Weight  *int     `json:"weight,omitempty"`
 }
 
+// Wind representa dados de vento agregados
 type Wind struct {
 	Deg   *int     `json:"deg,omitempty"`
 	Speed *float64 `json:"speed,omitempty"`
 }
 
+// Pressure representa dados de pressão agregados
 type Pressure struct {
 	Min     *int     `json:"min,omitempty"`
 	Max     *int     `json:"max,omitempty"`
@@ -76,67 +121,268 @@ type Pressure struct {
 	Weight  *int     `json:"weight,omitempty"`
 }
 
+// Precipitation representa dados de precipitação agregados
 type Precipitation struct {
-	// Campos vazios no JSON, adicione conforme necessário
+	// TODO: Adicionar campos conforme necessário
 }
 
-type OpenWeatherClient struct {
-	appID  string
-	client *http.Client
-}
+// ClientOption é uma função para configurar o cliente
+type ClientOption func(*OpenWeatherClient)
 
-func NewOpenWeatherClient(appID string) *OpenWeatherClient {
-	return &OpenWeatherClient{
-		appID:  appID,
-		client: &http.Client{},
+// WithHTTPClient permite configurar um cliente HTTP customizado
+func WithHTTPClient(client *http.Client) ClientOption {
+	return func(c *OpenWeatherClient) {
+		c.client = client
 	}
 }
 
-func (c *OpenWeatherClient) SendMeasurement(measurement Measurement) (*http.Response, error) {
+// WithBaseURL permite configurar uma URL base customizada
+func WithBaseURL(baseURL string) ClientOption {
+	return func(c *OpenWeatherClient) {
+		c.baseURL = baseURL
+	}
+}
+
+// WithTimeout permite configurar um timeout customizado
+func WithTimeout(timeout time.Duration) ClientOption {
+	return func(c *OpenWeatherClient) {
+		c.client.Timeout = timeout
+	}
+}
+
+// OpenWeatherClient é o cliente para interagir com a API OpenWeather
+type OpenWeatherClient struct {
+	appID   string
+	baseURL string
+	client  *http.Client
+}
+
+// NewOpenWeatherClient cria uma nova instância do cliente OpenWeather
+func NewOpenWeatherClient(appID string, opts ...ClientOption) (*OpenWeatherClient, error) {
+	if appID == "" {
+		return nil, ErrInvalidAppID
+	}
+
+	client := &OpenWeatherClient{
+		appID:   appID,
+		baseURL: defaultBaseURL,
+		client: &http.Client{
+			Timeout: defaultTimeout,
+		},
+	}
+
+	// Aplica as opções de configuração
+	for _, opt := range opts {
+		opt(client)
+	}
+
+	return client, nil
+}
+
+// SendMeasurement envia uma medição para a API OpenWeather
+func (c *OpenWeatherClient) SendMeasurement(ctx context.Context, measurement Measurement) error {
+	if err := measurement.Validate(); err != nil {
+		return fmt.Errorf("invalid measurement: %w", err)
+	}
+
 	body, err := json.Marshal([]Measurement{measurement})
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("failed to marshal measurement: %w", err)
 	}
 
-	urlStr := OpenWeatherUrl + MeasurementPath + "?appid=" + c.appID
-	req, err := http.NewRequest(http.MethodPost, urlStr, bytes.NewBuffer(body))
+	requestURL, err := c.buildURL(measurementPath, url.Values{
+		"appid": []string{c.appID},
+	})
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("failed to build URL: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	res, err := c.client.Do(req)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("failed to send request: %w", err)
 	}
-	defer res.Body.Close()
+	defer func() {
+		if cerr := res.Body.Close(); cerr != nil {
+			// Log error but don't override the main error
+		}
+	}()
 
-	return res, nil
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(res.Body)
+		return NewHTTPError(res.StatusCode, string(body))
+	}
+
+	return nil
 }
 
-func (c *OpenWeatherClient) GetMeasurement(stationID string, aggType AggregationType, limit int64, from, to time.Time) (*MeasurementResponse, error) {
-	qs := fmt.Sprintf("?station_id=%s&type=%s&limit=%d&from=%d&to=%d", stationID, aggType, limit, from.Unix(), to.Unix())
-	urlStr := OpenWeatherUrl + MeasurementPath + qs + "&appid=" + c.appID
-	req, err := http.NewRequest(http.MethodGet, urlStr, nil)
+// buildURL constrói uma URL completa para a API
+func (c *OpenWeatherClient) buildURL(path string, params url.Values) (string, error) {
+	baseURL, err := url.Parse(c.baseURL)
 	if err != nil {
-		return nil, err
+		return "", fmt.Errorf("invalid base URL: %w", err)
+	}
+
+	baseURL.Path = path
+	baseURL.RawQuery = params.Encode()
+
+	return baseURL.String(), nil
+}
+
+// GetMeasurementOptions define opções para consultar medições
+type GetMeasurementOptions struct {
+	StationID string
+	Type      AggregationType
+	Limit     int64
+	From      time.Time
+	To        time.Time
+}
+
+// Validate verifica se as opções são válidas
+func (opts *GetMeasurementOptions) Validate() error {
+	if opts.StationID == "" {
+		return ErrInvalidStationID
+	}
+	if err := opts.Type.Validate(); err != nil {
+		return err
+	}
+	if opts.Limit <= 0 {
+		return ErrInvalidLimit
+	}
+	if !opts.From.Before(opts.To) {
+		return ErrInvalidTimeRange
+	}
+	return nil
+}
+
+// GetMeasurement consulta medições da API OpenWeather
+func (c *OpenWeatherClient) GetMeasurement(ctx context.Context, opts GetMeasurementOptions) (*MeasurementResponse, error) {
+	if err := opts.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid options: %w", err)
+	}
+
+	params := url.Values{
+		"station_id": []string{opts.StationID},
+		"type":       []string{opts.Type.String()},
+		"limit":      []string{strconv.FormatInt(opts.Limit, 10)},
+		"from":       []string{strconv.FormatInt(opts.From.Unix(), 10)},
+		"to":         []string{strconv.FormatInt(opts.To.Unix(), 10)},
+		"appid":      []string{c.appID},
+	}
+
+	requestURL, err := c.buildURL(measurementPath, params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build URL: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	res, err := c.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer res.Body.Close()
+	defer func() {
+		if cerr := res.Body.Close(); cerr != nil {
+			// Log error but don't override the main error
+		}
+	}()
 
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to get measurement: %s", res.Status)
+		body, _ := io.ReadAll(res.Body)
+		return nil, NewHTTPError(res.StatusCode, string(body))
 	}
 
 	var measurementResponse MeasurementResponse
 	if err := json.NewDecoder(res.Body).Decode(&measurementResponse); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	return &measurementResponse, nil
+}
+
+// HTTPError representa um erro HTTP para integração com o sistema de retry
+type HTTPError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Message)
+}
+
+// NewHTTPError cria um novo erro HTTP
+func NewHTTPError(statusCode int, message string) *HTTPError {
+	return &HTTPError{
+		StatusCode: statusCode,
+		Message:    message,
+	}
+}
+
+// QueueMessage representa uma mensagem da fila (deve ser compatível com o pacote queue)
+type QueueMessage struct {
+	ID        string               `json:"id"`
+	Data      QueueMeasurementData `json:"data"`
+	Attempts  int                  `json:"attempts"`
+	MaxTries  int                  `json:"max_tries"`
+	CreatedAt time.Time            `json:"created_at"`
+	LastTry   time.Time            `json:"last_try"`
+}
+
+// QueueMeasurementData representa os dados de uma medição na fila
+type QueueMeasurementData struct {
+	Temperature float64 `json:"temperature"`
+	Humidity    float64 `json:"humidity"`
+	Pressure    int64   `json:"pressure"`
+}
+
+// OpenWeatherWorker implementa um worker para processar mensagens usando OpenWeather API
+type OpenWeatherWorker struct {
+	client    *OpenWeatherClient
+	stationID string
+}
+
+// NewOpenWeatherWorker cria um novo worker para OpenWeather
+func NewOpenWeatherWorker(client *OpenWeatherClient, stationID string) *OpenWeatherWorker {
+	return &OpenWeatherWorker{
+		client:    client,
+		stationID: stationID,
+	}
+}
+
+// Process processa uma mensagem da fila enviando para a API OpenWeather
+func (w *OpenWeatherWorker) Process(ctx context.Context, msg QueueMessage) error {
+	// Converte os dados da fila para o formato Measurement da API
+	measurement := Measurement{
+		StationID:   w.stationID,
+		Dt:          time.Now().Unix(),
+		Temperature: msg.Data.Temperature,
+		Pressure:    msg.Data.Pressure,
+		Humidity:    msg.Data.Humidity,
+		WindSpeed:   0,
+		WindGust:    0,
+		Rain1h:      0,
+		Clouds:      []Clouds{},
+	}
+
+	// Envia a medição para a API
+	err := w.client.SendMeasurement(ctx, measurement)
+	if err != nil {
+		// Se for um erro HTTP, retorna um HTTPError para o sistema de retry
+		if httpErr, ok := err.(*HTTPError); ok {
+			return httpErr
+		}
+		// Para outros tipos de erro, ainda retorna HTTPError se conseguir extrair o código
+		return NewHTTPError(500, err.Error())
+	}
+
+	return nil
 }
