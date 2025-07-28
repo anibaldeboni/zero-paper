@@ -3,7 +3,6 @@ package queue
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"strconv"
 	"sync"
@@ -16,6 +15,34 @@ var (
 	ErrCircuitBreakerOpen = errors.New("circuit breaker is open")
 	ErrMaxRetriesExceeded = errors.New("maximum retries exceeded")
 )
+
+// RetryableError define a interface para erros que podem ser retentados
+type RetryableError interface {
+	error
+	IsRetryable() bool
+}
+
+// SimpleRetryableError implementação simples de RetryableError
+type SimpleRetryableError struct {
+	err       error
+	retryable bool
+}
+
+func (e *SimpleRetryableError) Error() string {
+	return e.err.Error()
+}
+
+func (e *SimpleRetryableError) IsRetryable() bool {
+	return e.retryable
+}
+
+// NewRetryableError cria um novo erro retentável
+func NewRetryableError(err error, retryable bool) *SimpleRetryableError {
+	return &SimpleRetryableError{
+		err:       err,
+		retryable: retryable,
+	}
+}
 
 // Message representa uma mensagem na fila com metadados de controle
 type Message[T any] struct {
@@ -57,41 +84,20 @@ func DefaultRetryPolicy() RetryPolicy {
 
 // CalculateDelay calcula o delay para a próxima tentativa usando backoff exponential
 func (rp RetryPolicy) CalculateDelay(attempt int) time.Duration {
-	delay := rp.BaseDelay * time.Duration(1<<uint(attempt))
-	if delay > rp.MaxDelay {
-		delay = rp.MaxDelay
-	}
+	delay := min(rp.BaseDelay*time.Duration(1<<uint(attempt)), rp.MaxDelay)
 	return delay
 }
 
-// ShouldRetry determina se um erro deve ser retentado
+// ShouldRetry determina se um erro deve ser retentado usando a nova interface
 func ShouldRetry(err error) bool {
-	// Verifica se é um erro HTTP da família 5xx
-	if httpErr, ok := err.(*HTTPError); ok {
-		return httpErr.StatusCode >= 500 && httpErr.StatusCode < 600
+	// Verifica se o erro implementa RetryableError
+	if retryableErr, ok := err.(RetryableError); ok {
+		return retryableErr.IsRetryable()
 	}
 
-	// Outros tipos de erro que devem ser retentados
+	// Fallback: outros tipos de erro são considerados retentáveis por padrão
 	// Como timeout, connection refused, etc.
 	return true
-}
-
-// HTTPError representa um erro HTTP com código de status
-type HTTPError struct {
-	StatusCode int
-	Message    string
-}
-
-func (e *HTTPError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Message)
-}
-
-// NewHTTPError cria um novo erro HTTP
-func NewHTTPError(statusCode int, message string) *HTTPError {
-	return &HTTPError{
-		StatusCode: statusCode,
-		Message:    message,
-	}
 }
 
 // CircuitBreakerState representa o estado do circuit breaker

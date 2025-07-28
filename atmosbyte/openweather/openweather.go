@@ -319,6 +319,12 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Message)
 }
 
+// IsRetryable implementa a interface RetryableError
+func (e *HTTPError) IsRetryable() bool {
+	// Erros HTTP 5xx são retentáveis
+	return e.StatusCode >= 500 && e.StatusCode < 600
+}
+
 // NewHTTPError cria um novo erro HTTP
 func NewHTTPError(statusCode int, message string) *HTTPError {
 	return &HTTPError{
@@ -339,9 +345,9 @@ type QueueMessage struct {
 
 // QueueMeasurementData representa os dados de uma medição na fila
 type QueueMeasurementData struct {
-	Temperature float64 `json:"temperature"`
-	Humidity    float64 `json:"humidity"`
-	Pressure    int64   `json:"pressure"`
+	Temperature float64 `json:"temperature"` // Temperatura em Celsius
+	Humidity    float64 `json:"humidity"`    // Umidade relativa em %
+	Pressure    int64   `json:"pressure"`    // Pressão em Pascal
 }
 
 // OpenWeatherWorker implementa um worker para processar mensagens usando OpenWeather API

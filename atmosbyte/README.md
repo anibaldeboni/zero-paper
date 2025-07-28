@@ -1,301 +1,329 @@
-# Sistema de Fila Genérico Atmosbyte
+# Atmosbyte - Sistema de Processamento de Dados Meteorológicos
 
-Este projeto implementa um sistema robusto de fila de mensagens **genérico** para processamento de dados de qualquer tipo, com suporte a retry automático, circuit breaker e integração específica com a API OpenWeather.
+Este projeto implementa um sistema completo de coleta, processamento e envio de dados meteorológicos usando Go, integrando sensor BME280, sistema de fila genérico com retry/circuit breaker e API OpenWeather.
 
 ## 🎯 Principais Características
 
-### **Sistema Genérico**
+### **Arquitetura Modular**
+- **Package BME280**: Leitura de sensor hardware com encapsulamento limpo
+- **Package Queue**: Sistema genérico de fila com retry e circuit breaker
+- **Package OpenWeather**: Cliente HTTP para API OpenWeather
+- **Coordenação Central**: `main.go` orquestra todos os componentes
 
-- **Tipo genérico**: Suporte a qualquer tipo de dados usando Go Generics
-- **Type safety**: Verificação de tipos em tempo de compilação
-- **Flexibilidade total**: Não limitado a dados meteorológicos
+### **Flexibilidade de Fonte de Dados**
+- **Sensor Real**: BME280 via I2C para temperatura, umidade e pressão
+- **Sensor Simulado**: Geração de dados realistas quando hardware não disponível
+- **Fallback Automático**: Detecta hardware e alterna para simulação se necessário
 
-### **Sistema de Fila**
-
-- **Workers configuráveis**: Número ajustável de workers para processamento paralelo
-- **Buffer configurável**: Tamanho do buffer interno da fila
-- **Graceful shutdown**: Finalização elegante aguardando processamento das mensagens pendentes
-
-### **Sistema de Retry**
-
-- **Política de retry configurável**: Máximo de tentativas, delay base e máximo
-- **Backoff exponencial**: Aumento progressivo do tempo entre tentativas
-- **Retry inteligente**: Só retenta erros HTTP 5xx e outros erros específicos
-
-### **Circuit Breaker**
-
-- **Proteção contra falhas**: Evita chamadas excessivas a serviços com problemas
-- **Estados automáticos**: Fechado → Aberto → Semi-aberto
-- **Configuração flexível**: Threshold de falhas e timeout configuráveis
+### **Sistema de Fila Robusto**
+- **Retry inteligente**: Interface `RetryableError` para lógica personalizada
+- **Circuit breaker**: Proteção contra falhas da API externa
+- **Processamento paralelo**: Workers configuráveis
+- **Graceful shutdown**: Finalização elegante com processamento de mensagens pendentes
 
 ## 📁 Estrutura do Projeto
 
 ```
 atmosbyte/
-├── queue/
-│   ├── queue.go                    # Sistema principal de fila (genérico)
-│   ├── measurement.go              # Tipos específicos para medições meteorológicas
-│   ├── queue_test.go              # Testes para funcionalidade específica
-│   └── generic_examples_test.go   # Exemplos de uso com tipos customizados
-├── openweather/
-│   └── openweather.go             # Cliente e worker OpenWeather
-├── adapter.go                     # Adapter para integração OpenWeather
-└── main.go                       # Exemplo de uso
+├── bme280/                 # Package do sensor BME280
+│   ├── bme280.go          # Implementação principal
+│   ├── bme280_test.go     # Testes unitários
+│   ├── example/           # Exemplo de uso
+│   └── README.md          # Documentação específica
+├── queue/                  # Sistema de fila genérico
+│   ├── queue.go           # Implementação principal
+│   ├── measurement.go     # Tipos para medições
+│   └── queue_test.go      # Testes completos
+├── openweather/           # Cliente OpenWeather API
+│   └── openweather.go     # Cliente HTTP e workers
+├── adapter.go             # Adapter entre OpenWeather e queue
+├── sensor_worker.go       # Workers para coleta de dados
+├── measurement.go         # Type aliases para facilitar uso
+├── main.go               # Coordenação principal
+└── .env.example          # Exemplo de configuração
 ```
 
-## 🚀 Como Usar
+## 🚀 Quick Start
 
-### 1. Fila Genérica com Tipos Customizados
-
-```go
-// Defina seu tipo de dados
-type OrderData struct {
-    ID       string  `json:"id"`
-    Amount   float64 `json:"amount"`
-    Customer string  `json:"customer"`
-}
-
-// Implemente um worker
-type OrderWorker struct{}
-
-func (w *OrderWorker) Process(ctx context.Context, msg queue.Message[OrderData]) error {
-    // Processa o pedido
-    fmt.Printf("Processing order %s for %s: $%.2f\n",
-        msg.Data.ID, msg.Data.Customer, msg.Data.Amount)
-    return nil
-}
-
-// Use a fila
-worker := &OrderWorker{}
-config := queue.DefaultQueueConfig()
-q := queue.NewQueue[OrderData](worker, config)
-
-// Envia dados
-order := OrderData{ID: "ORD001", Amount: 99.50, Customer: "João"}
-q.Enqueue(order)
-```
-
-### 2. Usando WorkerFunc (Mais Simples)
-
-```go
-// Worker usando função anônima
-workerFunc := queue.WorkerFunc[string](func(ctx context.Context, msg queue.Message[string]) error {
-    fmt.Printf("Processing message: %s\n", msg.Data)
-    return nil
-})
-
-q := queue.NewQueue[string](workerFunc, config)
-q.Enqueue("Hello, World!")
-```
-
-### 3. Caso Específico: Dados Meteorológicos
-
-```go
-// Para medições meteorológicas, use os tipos helper
-worker := &MyMeasurementWorker{}
-q := queue.NewMeasurementQueue(worker, config)
-
-measurement := queue.Measurement{
-    Temperature: 25.5,
-    Humidity:    60.0,
-    Pressure:    1013,
-}
-q.Enqueue(measurement)
-```
-
-### 4. Integração OpenWeather (Caso Real)
-
-```go
-// Cliente OpenWeather
-client, err := openweather.NewOpenWeatherClient(apiKey)
-if err != nil {
-    log.Fatal(err)
-}
-
-// Worker OpenWeather
-owWorker := openweather.NewOpenWeatherWorker(client, stationID)
-worker := NewOpenWeatherWorkerAdapter(owWorker)
-
-// Fila específica para meteorologia
-q := queue.NewMeasurementQueue(worker, config)
-```
-
-## 💡 Exemplos de Tipos Customizados
-
-### Sistema de Eventos
-
-```go
-type EventData struct {
-    Type      string                 `json:"type"`
-    Timestamp time.Time              `json:"timestamp"`
-    Payload   map[string]interface{} `json:"payload"`
-}
-
-type EventWorker struct{}
-
-func (w *EventWorker) Process(ctx context.Context, msg queue.Message[EventData]) error {
-    switch msg.Data.Type {
-    case "user.login":
-        return w.handleLogin(msg.Data.Payload)
-    case "order.created":
-        return w.handleOrder(msg.Data.Payload)
-    default:
-        return w.handleGeneric(msg.Data)
-    }
-}
-
-q := queue.NewQueue[EventData](worker, config)
-```
-
-### Sistema de Logs
-
-```go
-type LogEntry struct {
-    Level     string    `json:"level"`
-    Message   string    `json:"message"`
-    Timestamp time.Time `json:"timestamp"`
-    Source    string    `json:"source"`
-}
-
-workerFunc := queue.WorkerFunc[LogEntry](func(ctx context.Context, msg queue.Message[LogEntry]) error {
-    // Envia para Elasticsearch, arquivo, etc.
-    return logStorage.Store(msg.Data)
-})
-
-q := queue.NewQueue[LogEntry](workerFunc, config)
-```
-
-## ⚙️ Type Aliases para Facilitar o Uso
-
-O pacote fornece type aliases para casos comuns:
-
-```go
-// Para medições meteorológicas
-type MeasurementQueue = Queue[Measurement]
-type MeasurementMessage = Message[Measurement]
-type MeasurementWorker = Worker[Measurement]
-
-// Função helper
-func NewMeasurementQueue(worker MeasurementWorker, config QueueConfig) *MeasurementQueue
-
-// Você pode criar seus próprios aliases
-type OrderQueue = queue.Queue[OrderData]
-type EventQueue = queue.Queue[EventData]
-type LogQueue = queue.Queue[LogEntry]
-```
-
-## ✅ Vantagens do Sistema Genérico
-
-### Type Safety
-
-```go
-// Compile-time type checking
-q := queue.NewQueue[OrderData](worker, config)
-q.Enqueue(OrderData{...})          // ✅ OK
-q.Enqueue("string")                 // ❌ Compile error
-q.Enqueue(Measurement{...})         // ❌ Compile error
-```
-
-### Performance
-
-- Sem boxing/unboxing de interfaces vazias
-- Sem type assertions em runtime
-- Memory layout otimizado
-
-### Developer Experience
-
-- IDE fornece sugestões precisas
-- Refactoring seguro
-- Documentação contextual
-
-### Reutilização
-
-```go
-// Mesma infraestrutura para qualquer tipo
-emailQueue := queue.NewQueue[EmailData](emailWorker, config)
-orderQueue := queue.NewQueue[OrderData](orderWorker, config)
-logQueue := queue.NewQueue[LogEntry](logWorker, config)
-```
-
-## 🔧 Execução e Testes
+### 1. Instalação
 
 ```bash
-# Testes básicos
-go test ./queue
+# Clone o repositório
+git clone https://github.com/anibaldeboni/zero-paper.git
+cd zero-paper/atmosbyte
+
+# Instale dependências do BME280 (se usar hardware real)
+go get periph.io/x/conn/v3/...
+go get periph.io/x/devices/v3/...
+go get periph.io/x/host/v3
+
+# Compile o projeto
+go build .
+```
+
+### 2. Configuração
+
+```bash
+# Copie o arquivo de exemplo
+cp .env.example .env
+
+# Configure suas credenciais
+export OPENWEATHER_API_KEY="sua_chave_api"
+export STATION_ID="sua_estacao_meteorologica"
+
+# Para usar sensor simulado (padrão para desenvolvimento)
+export USE_SIMULATED_SENSOR="true"
+
+# Para usar BME280 real (Raspberry Pi com hardware)
+export USE_SIMULATED_SENSOR="false"
+```
+
+### 3. Execução
+
+```bash
+# Desenvolvimento (sensor simulado)
+USE_SIMULATED_SENSOR=true go run .
+
+# Produção (BME280 real)
+USE_SIMULATED_SENSOR=false go run .
+
+# Com logs detalhados
+go run . -v
+```
+
+## 💻 Exemplos de Uso
+
+### Sensor Simulado (Desenvolvimento)
+```bash
+$ USE_SIMULATED_SENSOR=true go run .
+2025/07/28 11:45:00 Starting Atmosbyte - Weather Data Processing System
+2025/07/28 11:45:00 Using simulated sensor data
+2025/07/28 11:45:00 Starting simulated sensor worker (generating data every 10s)
+2025/07/28 11:45:10 Simulated reading enqueued: temp=27.5°C, humidity=62.3%, pressure=101250 Pa
+2025/07/28 11:45:10 Worker 0: Successfully processed message 1753713910123456000
+```
+
+### BME280 Hardware (Produção)
+```bash
+$ USE_SIMULATED_SENSOR=false go run .
+2025/07/28 11:45:00 Starting Atmosbyte - Weather Data Processing System
+2025/07/28 11:45:00 Attempting to use BME280 hardware sensor
+2025/07/28 11:45:00 BME280 sensor initialized successfully
+2025/07/28 11:45:00 Starting BME280 sensor worker (reading every 10s)
+2025/07/28 11:45:10 BME280 reading enqueued: temp=23.4°C, humidity=58.2%, pressure=101325 Pa
+2025/07/28 11:45:10 Worker 0: Successfully processed message 1753713910123456000
+```
+
+### Fallback Automático
+```bash
+$ USE_SIMULATED_SENSOR=false go run .
+2025/07/28 11:45:00 Starting Atmosbyte - Weather Data Processing System
+2025/07/28 11:45:00 Attempting to use BME280 hardware sensor
+2025/07/28 11:45:00 Failed to initialize BME280 sensor: failed to open I2C bus
+2025/07/28 11:45:00 Falling back to simulated sensor data
+2025/07/28 11:45:00 Starting simulated sensor worker (generating data every 10s)
+```
+
+## 🔧 Configuração Avançada
+
+### Variáveis de Ambiente
+
+| Variável | Descrição | Padrão | Obrigatória |
+|----------|-----------|---------|-------------|
+| `OPENWEATHER_API_KEY` | Chave da API OpenWeather | - | ✅ |
+| `STATION_ID` | ID da estação meteorológica | - | ✅ |
+| `USE_SIMULATED_SENSOR` | Usar sensor simulado | `false` | ❌ |
+
+### Configuração do BME280
+
+```go
+// Configuração customizada do sensor
+config := &bme280.Config{
+    Address: 0x77,           // Endereço I2C alternativo
+    BusName: "/dev/i2c-1",   // Bus específico
+    Options: customOpts,     // Opções de precisão
+}
+```
+
+### Configuração da Fila
+
+```go
+config := queue.DefaultQueueConfig()
+config.Workers = 4                        // 4 workers paralelos
+config.BufferSize = 100                   // Buffer de 100 mensagens
+config.RetryPolicy.MaxRetries = 5         // Máximo 5 tentativas
+config.RetryPolicy.BaseDelay = 10 * time.Second
+```
+
+## 🧪 Testes
+
+```bash
+# Testes completos
+go test ./...
 
 # Testes com verbose
+go test -v ./...
+
+# Testes específicos
 go test -v ./queue
+go test -v ./bme280
 
-# Executar exemplo específico
-go test -v ./queue -run TestGenericQueue_CustomType
+# Benchmarks
+go test -bench=. ./...
 
-# Executar main (exemplo OpenWeather)
-export OPENWEATHER_API_KEY="sua_chave"
-export STATION_ID="sua_estacao"
-go run .
-```
-
-## 🔄 Migração de Código Existente
-
-### Antes (Não Genérico)
-
-```go
-type Worker interface {
-    Process(ctx context.Context, data interface{}) error
-}
-
-func (w *MyWorker) Process(ctx context.Context, data interface{}) error {
-    // Type assertion necessária
-    myData, ok := data.(MyDataType)
-    if !ok {
-        return errors.New("invalid data type")
-    }
-    // processar myData...
-}
-```
-
-### Depois (Genérico)
-
-```go
-type MyWorker struct{}
-
-func (w *MyWorker) Process(ctx context.Context, msg queue.Message[MyDataType]) error {
-    // Tipo já garantido, sem type assertion
-    myData := msg.Data
-    // processar myData...
-}
+# Coverage
+go test -cover ./...
 ```
 
 ## 📊 Monitoramento
 
-```go
-stats := q.Stats()
-log.Printf("Queue: %d, Retry: %d, CircuitBreaker: %v, Workers: %d",
-    stats.QueueSize,
-    stats.RetryQueueSize,
-    stats.CircuitBreakerState,
-    stats.Workers,
-)
+O sistema fornece logs estruturados e estatísticas em tempo real:
+
+```
+📊 Queue stats - Size: 2, Retry: 0, CircuitBreaker: Closed, Workers: 2
 ```
 
-## 🏗️ Boas Práticas Implementadas
+### Métricas Disponíveis
+- **QueueSize**: Mensagens na fila principal
+- **RetryQueueSize**: Mensagens aguardando retry
+- **CircuitBreakerState**: Estado do circuit breaker (Closed/Open/HalfOpen)
+- **Workers**: Número de workers ativos
 
-### Go Standards
+## 🛠️ Desenvolvimento
 
-- ✅ Go Generics para type safety
-- ✅ Interfaces pequenas e focadas
-- ✅ Context para cancelamento
-- ✅ Error wrapping
-- ✅ Graceful shutdown
-- ✅ Concurrent safe com mutexes
-- ✅ Channels para comunicação
+### Adicionando Novos Sensores
 
-### Reliability Patterns
+1. Implemente a interface `SensorWorker`:
+```go
+type CustomSensorWorker struct {
+    // campos específicos
+}
 
-- ✅ Circuit Breaker Pattern
-- ✅ Retry with Exponential Backoff
-- ✅ Worker Pool Pattern
-- ✅ Graceful Degradation
-- ✅ Error Classification
+func (w *CustomSensorWorker) Start(ctx context.Context) error {
+    // lógica de leitura contínua
+}
 
-Este sistema genérico oferece máxima flexibilidade mantendo type safety e performance, permitindo que seja usado para qualquer tipo de processamento de dados em fila!
+func (w *CustomSensorWorker) Stop() {
+    // cleanup
+}
+```
+
+2. Registre no `main.go`:
+```go
+customWorker := NewCustomSensorWorker(params)
+sensorManager := NewSensorManager(customWorker)
+```
+
+### Adicionando Novos Destinos
+
+1. Implemente a interface `queue.Worker[bme280.Measurement]`:
+```go
+type CustomDestinationWorker struct{}
+
+func (w *CustomDestinationWorker) Process(ctx context.Context, msg queue.Message[bme280.Measurement]) error {
+    // processar measurement
+    return nil
+}
+```
+
+2. Crie adapter se necessário e registre na fila.
+
+## 🔍 Troubleshooting
+
+### Sensor BME280 não encontrado
+```
+Failed to initialize BME280 sensor: failed to open I2C bus
+```
+**Soluções:**
+1. Verificar se I2C está habilitado: `sudo raspi-config`
+2. Verificar conexões físicas
+3. Usar `i2cdetect -y 1` para encontrar dispositivos
+4. Sistema fará fallback automático para simulação
+
+### Erro de API OpenWeather
+```
+Worker 0: Error processing message: HTTP 401: Invalid API key
+```
+**Soluções:**
+1. Verificar `OPENWEATHER_API_KEY`
+2. Confirmar que a chave tem acesso à API 3.0
+3. Verificar `STATION_ID` correto
+
+### Circuit Breaker Aberto
+```
+Queue stats - CircuitBreaker: Open
+```
+**Soluções:**
+1. Aguardar timeout de recovery
+2. Verificar conectividade com API
+3. Verificar logs de erro detalhados
+
+## 🏗️ Arquitetura Detalhada
+
+### Fluxo de Dados
+
+```
+[BME280/Simulado] → [SensorWorker] → [Queue] → [OpenWeatherWorker] → [API]
+                      ↓
+                [bme280.Measurement]
+                      ↓
+            [Queue com Retry/CircuitBreaker]
+                      ↓
+              [OpenWeatherAdapter]
+                      ↓
+                [HTTP Request]
+```
+
+### Desacoplamento
+
+1. **BME280 ↔ OpenWeather**: Não há dependência direta
+2. **Queue ↔ Sensors**: Interface genérica
+3. **Main ↔ Modules**: Coordenação sem acoplamento
+4. **Adapters**: Conversão entre formatos de dados
+
+### Princípios Aplicados
+
+- ✅ **Single Responsibility**: Cada package tem responsabilidade única
+- ✅ **Open/Closed**: Extensível sem modificar código existente
+- ✅ **Dependency Inversion**: Depende de interfaces, não implementações
+- ✅ **Interface Segregation**: Interfaces pequenas e focadas
+- ✅ **DRY**: Código reutilizável e componível
+
+## 📋 Checklist de Produção
+
+### Hardware
+- [ ] Raspberry Pi configurado com I2C habilitado
+- [ ] BME280 conectado corretamente
+- [ ] Alimentação estável
+- [ ] Conectividade de rede
+
+### Software
+- [ ] Go 1.18+ instalado
+- [ ] Dependências periph.io instaladas
+- [ ] Variáveis de ambiente configuradas
+- [ ] Permissões I2C corretas
+- [ ] Logs configurados
+
+### API
+- [ ] Chave OpenWeather válida
+- [ ] Station ID correto
+- [ ] Limite de requisições verificado
+- [ ] Conectividade testada
+
+## 🔗 Referências
+
+- [BME280 Package](./bme280/README.md) - Documentação específica do sensor
+- [Queue System](./queue/) - Sistema de fila genérico
+- [OpenWeather API](https://openweathermap.org/api) - Documentação da API
+- [periph.io](https://periph.io/) - Biblioteca de hardware para Go
+
+## 📈 Roadmap
+
+- [ ] **Metrics**: Integração com Prometheus/Grafana
+- [ ] **Configuração**: Arquivo YAML/TOML para configurações
+- [ ] **Database**: Persistência local com SQLite
+- [ ] **Web UI**: Dashboard web para monitoramento
+- [ ] **Docker**: Containerização para deploy simplificado
+- [ ] **Alertas**: Notificações para condições específicas
+
+Este sistema fornece uma base sólida e extensível para processamento de dados meteorológicos em tempo real! 🌡️📊
