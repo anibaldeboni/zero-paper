@@ -3,7 +3,6 @@ package bme280
 import (
 	"errors"
 	"fmt"
-	"log"
 	"sync"
 
 	"periph.io/x/conn/v3/i2c"
@@ -140,28 +139,4 @@ func (s *Sensor) Close() error {
 func (m *Measurement) String() string {
 	return fmt.Sprintf("Temperature: %.2f°C, Humidity: %.2f%%, Pressure: %d Pa",
 		m.Temperature, m.Humidity, m.Pressure)
-}
-
-// ExampleUsage demonstra como usar o package bme280
-func ExampleUsage() {
-	// Cria sensor com configuração padrão
-	sensor, err := NewSensor(nil)
-	if err != nil {
-		log.Printf("Failed to create sensor: %v", err)
-		return
-	}
-	defer sensor.Close()
-
-	// Realiza uma leitura
-	measurement, err := sensor.Read()
-	if err != nil {
-		log.Printf("Failed to read sensor: %v", err)
-		return
-	}
-
-	// Exibe os resultados
-	fmt.Printf("Sensor reading: %s\n", measurement)
-	fmt.Printf("Temperature: %.2f°C\n", measurement.Temperature)
-	fmt.Printf("Humidity: %.2f%%\n", measurement.Humidity)
-	fmt.Printf("Pressure: %d Pa (%.2f hPa)\n", measurement.Pressure, float64(measurement.Pressure)/100.0)
 }
