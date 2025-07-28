@@ -11,6 +11,7 @@ import (
 	"github.com/anibaldeboni/zero-paper/atmosbyte/bme280"
 	"github.com/anibaldeboni/zero-paper/atmosbyte/openweather"
 	"github.com/anibaldeboni/zero-paper/atmosbyte/queue"
+	"github.com/anibaldeboni/zero-paper/atmosbyte/web"
 )
 
 func main() {
@@ -52,11 +53,14 @@ func main() {
 
 	// Cria o gerenciador de sensor
 	var sensorManager *SensorManager
+	var webSensor web.SensorProvider
 
 	if useSimulated {
 		log.Println("Using simulated sensor data")
 		simWorker := NewSimulatedSensorWorker(q, 10*time.Second)
 		sensorManager = NewSensorManager(simWorker)
+		// Usa um sensor simulado também para o web server
+		webSensor = NewSimulatedWebSensor()
 	} else {
 		log.Println("Attempting to use BME280 hardware sensor")
 		sensor, err := bme280.NewSensor(bme280.DefaultConfig())
@@ -66,9 +70,14 @@ func main() {
 			log.Println("BME280 sensor initialized successfully")
 			bmeWorker := NewBME280SensorWorker(sensor, q, time.Minute)
 			sensorManager = NewSensorManager(bmeWorker)
+			webSensor = NewBME280WebAdapter(sensor)
 			defer sensor.Close()
 		}
 	}
+
+	// Cria e configura o servidor web
+	webConfig := web.DefaultConfig()
+	webServer := web.NewServer(webSensor, useSimulated, webConfig)
 
 	// Configura graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -81,6 +90,13 @@ func main() {
 	go func() {
 		if err := sensorManager.Start(ctx); err != nil && err != context.Canceled {
 			log.Printf("Sensor manager error: %v", err)
+		}
+	}()
+
+	// Inicia o servidor web em uma goroutine
+	go func() {
+		if err := webServer.Start(); err != nil {
+			log.Printf("❌ Web server error: %v", err)
 		}
 	}()
 
@@ -108,6 +124,15 @@ func main() {
 
 	// Para o sensor manager
 	sensorManager.Stop()
+
+	// Para o servidor web graciosamente
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
+	if err := webServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("❌ Error shutting down web server: %v", err)
+	}
+
 	cancel() // cancela o context para parar todas as goroutines
 
 	// Aguarda um pouco para processar mensagens pendentes
