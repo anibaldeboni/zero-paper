@@ -4,13 +4,22 @@ package web
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"log"
 	"net/http"
 	"time"
 
 	"github.com/anibaldeboni/zero-paper/atmosbyte/bme280"
+)
+
+//go:embed templates/index.html
+var indexTemplate string
+
+var (
+	systemStartTime = time.Now()
 )
 
 // SensorProvider defines the interface for retrieving sensor measurements
@@ -23,6 +32,7 @@ type Server struct {
 	server       *http.Server
 	sensor       SensorProvider
 	useSimulated bool
+	template     *template.Template
 }
 
 // Config holds configuration options for the web server
@@ -59,15 +69,27 @@ type ErrorResponse struct {
 	Time  time.Time `json:"timestamp"`
 }
 
+// TemplateData holds data passed to HTML templates
+type TemplateData struct {
+	SystemStartTime string
+}
+
 // NewServer creates a new HTTP server instance with the given sensor provider
 func NewServer(sensor SensorProvider, useSimulated bool, config *Config) *Server {
 	if config == nil {
 		config = DefaultConfig()
 	}
 
+	// Compile the HTML template
+	tmpl, err := template.New("index").Parse(indexTemplate)
+	if err != nil {
+		log.Fatalf("Failed to parse HTML template: %v", err)
+	}
+
 	s := &Server{
 		sensor:       sensor,
 		useSimulated: useSimulated,
+		template:     tmpl,
 	}
 
 	mux := http.NewServeMux()
@@ -104,13 +126,13 @@ func (s *Server) Start() error {
 
 // Shutdown gracefully shuts down the HTTP server
 func (s *Server) Shutdown(ctx context.Context) error {
-	log.Println("🛑 Shutting down HTTP server...")
+	log.Println("Shutting down HTTP server...")
 
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("failed to shutdown server: %w", err)
 	}
 
-	log.Println("✅ HTTP server stopped")
+	log.Println("HTTP server stopped")
 	return nil
 }
 
@@ -123,7 +145,7 @@ func (s *Server) handleMeasurements(w http.ResponseWriter, r *http.Request) {
 
 	measurement, err := s.sensor.Read()
 	if err != nil {
-		log.Printf("❌ Failed to read sensor: %v", err)
+		log.Printf("Failed to read sensor: %v", err)
 		s.sendErrorResponse(w, "Failed to read sensor data", http.StatusInternalServerError)
 		return
 	}
@@ -160,19 +182,40 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.sendJSONResponse(w, health, http.StatusOK)
 }
 
-// handleRoot handles GET / - returns API information
+// handleRoot handles GET / - returns HTML page with weather information
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.sendErrorResponse(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	// Check if the request wants JSON (API client)
+	if r.Header.Get("Accept") == "application/json" || r.URL.Query().Get("format") == "json" {
+		s.handleAPIInfo(w, r)
+		return
+	}
+
+	// Serve HTML page
+	data := TemplateData{
+		SystemStartTime: systemStartTime.Format("02/01/2006 15:04:05"),
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	if err := s.template.Execute(w, data); err != nil {
+		log.Printf("Failed to execute template: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+// handleAPIInfo handles API information requests (JSON format)
+func (s *Server) handleAPIInfo(w http.ResponseWriter, _ *http.Request) {
 	info := map[string]any{
 		"service":   "Atmosbyte Weather API",
 		"version":   "1.0.0",
 		"timestamp": time.Now(),
 		"endpoints": map[string]string{
-			"/":             "API information",
+			"/":             "Web interface / API information",
 			"/health":       "Health check",
 			"/measurements": "Current sensor measurements",
 		},
@@ -203,7 +246,7 @@ func (s *Server) sendJSONResponse(w http.ResponseWriter, data interface{}, statu
 	w.WriteHeader(statusCode)
 
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Printf("❌ Failed to encode JSON response: %v", err)
+		log.Printf("Failed to encode JSON response: %v", err)
 	}
 }
 
@@ -229,7 +272,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(lrw, r)
 
 		duration := time.Since(start)
-		log.Printf("🌐 %s %s %d %v %s",
+		log.Printf("%s %s %d %v %s",
 			r.Method,
 			r.URL.Path,
 			lrw.statusCode,

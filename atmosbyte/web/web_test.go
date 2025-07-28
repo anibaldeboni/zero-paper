@@ -200,7 +200,7 @@ func TestHandleHealth_SimulatedSensor(t *testing.T) {
 	}
 }
 
-func TestHandleRoot(t *testing.T) {
+func TestHandleRoot_HTML(t *testing.T) {
 	sensor := &MockSensorProvider{}
 	server := NewServer(sensor, false, nil)
 
@@ -213,9 +213,37 @@ func TestHandleRoot(t *testing.T) {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
 
+	contentType := w.Header().Get("Content-Type")
+	if !strings.Contains(contentType, "text/html") {
+		t.Errorf("Expected HTML content type, got %s", contentType)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "Atmosbyte") {
+		t.Error("Expected HTML body to contain 'Atmosbyte'")
+	}
+
+	if !strings.Contains(body, "Monitoramento Meteorológico") {
+		t.Error("Expected HTML body to contain weather monitoring text")
+	}
+}
+
+func TestHandleRoot_JSON(t *testing.T) {
+	sensor := &MockSensorProvider{}
+	server := NewServer(sensor, false, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/?format=json", nil)
+	w := httptest.NewRecorder()
+
+	server.handleRoot(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+
 	var response map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatal("Failed to decode response:", err)
+		t.Fatal("Failed to decode JSON response:", err)
 	}
 
 	if response["service"] != "Atmosbyte Weather API" {
@@ -229,6 +257,30 @@ func TestHandleRoot(t *testing.T) {
 
 	if endpoints["/measurements"] == nil {
 		t.Error("Expected /measurements endpoint to be documented")
+	}
+}
+
+func TestHandleRoot_JSONAcceptHeader(t *testing.T) {
+	sensor := &MockSensorProvider{}
+	server := NewServer(sensor, false, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleRoot(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatal("Failed to decode JSON response:", err)
+	}
+
+	if response["service"] != "Atmosbyte Weather API" {
+		t.Errorf("Expected service name, got '%v'", response["service"])
 	}
 }
 
