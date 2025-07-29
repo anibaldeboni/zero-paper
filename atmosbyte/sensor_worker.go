@@ -9,8 +9,8 @@ import (
 	"github.com/anibaldeboni/zero-paper/atmosbyte/bme280"
 )
 
-// SensorWorker é responsável por ler dados de qualquer sensor e enviá-los para a fila
-type SensorWorker struct {
+// SensorReader é responsável por ler dados de qualquer sensor e enviá-los para a fila
+type SensorReader struct {
 	sensor   bme280.Reader
 	queue    *MeasurementQueue
 	interval time.Duration
@@ -18,9 +18,9 @@ type SensorWorker struct {
 	name     string // nome do sensor para logs
 }
 
-// NewSensorWorker cria um novo worker genérico de sensor
-func NewSensorWorker(sensor bme280.Reader, queue *MeasurementQueue, interval time.Duration, name string) *SensorWorker {
-	return &SensorWorker{
+// NewSensorReader cria um novo worker genérico de sensor
+func NewSensorReader(sensor bme280.Reader, queue *MeasurementQueue, interval time.Duration, name string) *SensorReader {
+	return &SensorReader{
 		sensor:   sensor,
 		queue:    queue,
 		interval: interval,
@@ -30,7 +30,7 @@ func NewSensorWorker(sensor bme280.Reader, queue *MeasurementQueue, interval tim
 }
 
 // Start inicia a leitura contínua do sensor
-func (w *SensorWorker) Start(ctx context.Context) error {
+func (w *SensorReader) Start(ctx context.Context) error {
 	log.Printf("Starting %s sensor worker (reading every %v)", w.name, w.interval)
 
 	ticker := time.NewTicker(w.interval)
@@ -55,12 +55,12 @@ func (w *SensorWorker) Start(ctx context.Context) error {
 }
 
 // Stop para o worker do sensor
-func (w *SensorWorker) Stop() {
+func (w *SensorReader) Stop() {
 	close(w.stopCh)
 }
 
 // readAndEnqueue lê uma medição do sensor e a envia para a fila
-func (w *SensorWorker) readAndEnqueue() error {
+func (w *SensorReader) readAndEnqueue() error {
 	measurement, err := w.sensor.Read()
 	if err != nil {
 		return fmt.Errorf("failed to read from %s sensor: %w", w.name, err)

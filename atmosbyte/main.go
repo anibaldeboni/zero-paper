@@ -123,14 +123,14 @@ func main() {
 
 	// Cria o worker do sensor
 	var (
-		sensorWorker        *SensorWorker
+		sensorReader        *SensorReader
 		environmentalSensor bme280.Reader
 	)
 
 	if useSimulated {
 		log.Println("Using simulated sensor data")
 		simSensor := bme280.NewSimulatedSensor(nil)
-		sensorWorker = NewSensorWorker(simSensor, q, 10*time.Second, "Simulated")
+		sensorReader = NewSensorReader(simSensor, q, 10*time.Second, "Simulated")
 		// Usa o mesmo sensor simulado para o web server
 		environmentalSensor = simSensor
 	} else {
@@ -140,7 +140,7 @@ func main() {
 			log.Fatalf("Failed to initialize BME280 sensor: %v", err)
 		} else {
 			log.Println("BME280 sensor initialized successfully")
-			sensorWorker = NewSensorWorker(sensor, q, time.Minute, "BME280")
+			sensorReader = NewSensorReader(sensor, q, time.Minute, "BME280")
 			environmentalSensor = sensor
 			defer sensor.Close()
 		}
@@ -157,7 +157,7 @@ func main() {
 
 	// Inicia o sensor em uma goroutine
 	go func() {
-		if err := sensorWorker.Start(ctx); err != nil && err != context.Canceled {
+		if err := sensorReader.Start(ctx); err != nil && err != context.Canceled {
 			log.Printf("Sensor worker error: %v", err)
 		}
 	}()
@@ -174,7 +174,7 @@ func main() {
 	log.Println("Shutdown signal received...")
 
 	// Para o sensor worker
-	sensorWorker.Stop()
+	sensorReader.Stop()
 
 	// Para o servidor web graciosamente
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
