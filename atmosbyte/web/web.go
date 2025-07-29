@@ -135,7 +135,7 @@ func (s *Server) GetRoutes() map[string]string {
 
 // Start starts the HTTP server
 func (s *Server) Start() error {
-	log.Printf("🌐 Starting HTTP server on %s", s.server.Addr)
+	log.Printf("Starting HTTP server on %s", s.server.Addr)
 
 	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("failed to start server: %w", err)
@@ -245,7 +245,6 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 // getSensorStatus returns the current sensor status
 func (s *Server) getSensorStatus() string {
-	// Try to read from sensor to check if it's working
 	_, err := s.sensor.Read()
 	if err != nil {
 		return "error"
@@ -280,7 +279,6 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		// Create a custom ResponseWriter to capture status code
 		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
 		next.ServeHTTP(lrw, r)
