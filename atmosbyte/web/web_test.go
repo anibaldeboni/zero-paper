@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/anibaldeboni/zero-paper/atmosbyte/bme280"
+	"github.com/anibaldeboni/zero-paper/atmosbyte/queue"
 )
 
 // MockSensorProvider implements SensorProvider for testing
@@ -23,11 +24,28 @@ func (m *MockSensorProvider) Read() (bme280.Measurement, error) {
 	return m.measurement, m.err
 }
 
+// MockQueueStatsProvider implements QueueStatsProvider for testing
+type MockQueueStatsProvider struct {
+	stats queue.QueueStats
+}
+
+func (m *MockQueueStatsProvider) Stats() queue.QueueStats {
+	return m.stats
+}
+
+var queueProvider = &MockQueueStatsProvider{
+	stats: queue.QueueStats{
+		QueueSize:      5,
+		RetryQueueSize: 1,
+		Workers:        2,
+	},
+}
+
 func TestNewServer(t *testing.T) {
 	sensor := &MockSensorProvider{}
 	config := DefaultConfig()
 
-	server := NewServer(sensor, false, config)
+	server := NewServer(sensor, config, queueProvider)
 
 	if server == nil {
 		t.Fatal("Expected server to be created")
@@ -37,8 +55,8 @@ func TestNewServer(t *testing.T) {
 		t.Error("Expected sensor to be set correctly")
 	}
 
-	if server.useSimulated != false {
-		t.Error("Expected useSimulated to be false")
+	if server.queue != queueProvider {
+		t.Error("Expected queue to be set correctly")
 	}
 }
 
@@ -54,6 +72,25 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestGetRoutes(t *testing.T) {
+	sensor := &MockSensorProvider{}
+	server := NewServer(sensor, nil, queueProvider)
+
+	routes := server.GetRoutes()
+
+	expectedRoutes := []string{"/", "/health", "/measurements", "/queue"}
+
+	for _, route := range expectedRoutes {
+		if _, exists := routes[route]; !exists {
+			t.Errorf("Expected route %s to exist in routes map", route)
+		}
+	}
+
+	if len(routes) != len(expectedRoutes) {
+		t.Errorf("Expected %d routes, got %d", len(expectedRoutes), len(routes))
+	}
+}
+
 func TestHandleMeasurements_Success(t *testing.T) {
 	measurement := bme280.Measurement{
 		Temperature: 25.5,
@@ -62,7 +99,7 @@ func TestHandleMeasurements_Success(t *testing.T) {
 	}
 
 	sensor := &MockSensorProvider{measurement: measurement}
-	server := NewServer(sensor, false, nil)
+	server := NewServer(sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/measurements", nil)
 	w := httptest.NewRecorder()
@@ -95,7 +132,7 @@ func TestHandleMeasurements_Success(t *testing.T) {
 	}
 }
 
-func TestHandleMeasurements_SimulatedSource(t *testing.T) {
+func TestHandleMeasurements_WorkingSensor(t *testing.T) {
 	measurement := bme280.Measurement{
 		Temperature: 22.0,
 		Humidity:    55.0,
@@ -103,7 +140,7 @@ func TestHandleMeasurements_SimulatedSource(t *testing.T) {
 	}
 
 	sensor := &MockSensorProvider{measurement: measurement}
-	server := NewServer(sensor, true, nil) // useSimulated = true
+	server := NewServer(sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/measurements", nil)
 	w := httptest.NewRecorder()
@@ -113,14 +150,14 @@ func TestHandleMeasurements_SimulatedSource(t *testing.T) {
 	var response MeasurementResponse
 	json.NewDecoder(w.Body).Decode(&response)
 
-	if response.Source != "Simulated" {
-		t.Errorf("Expected source 'Simulated', got '%s'", response.Source)
+	if response.Source != "BME280" {
+		t.Errorf("Expected source 'BME280', got '%s'", response.Source)
 	}
 }
 
 func TestHandleMeasurements_SensorError(t *testing.T) {
 	sensor := &MockSensorProvider{err: errors.New("sensor read error")}
-	server := NewServer(sensor, false, nil)
+	server := NewServer(sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/measurements", nil)
 	w := httptest.NewRecorder()
@@ -143,7 +180,7 @@ func TestHandleMeasurements_SensorError(t *testing.T) {
 
 func TestHandleMeasurements_MethodNotAllowed(t *testing.T) {
 	sensor := &MockSensorProvider{}
-	server := NewServer(sensor, false, nil)
+	server := NewServer(sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodPost, "/measurements", nil)
 	w := httptest.NewRecorder()
@@ -158,7 +195,7 @@ func TestHandleMeasurements_MethodNotAllowed(t *testing.T) {
 func TestHandleHealth(t *testing.T) {
 	measurement := bme280.Measurement{Temperature: 25.0, Humidity: 50.0, Pressure: 101325}
 	sensor := &MockSensorProvider{measurement: measurement}
-	server := NewServer(sensor, false, nil)
+	server := NewServer(sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -183,9 +220,9 @@ func TestHandleHealth(t *testing.T) {
 	}
 }
 
-func TestHandleHealth_SimulatedSensor(t *testing.T) {
+func TestHandleHealth_WorkingSensor(t *testing.T) {
 	sensor := &MockSensorProvider{}
-	server := NewServer(sensor, true, nil) // useSimulated = true
+	server := NewServer(sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -195,14 +232,14 @@ func TestHandleHealth_SimulatedSensor(t *testing.T) {
 	var response map[string]interface{}
 	json.NewDecoder(w.Body).Decode(&response)
 
-	if response["sensor"] != "simulated" {
-		t.Errorf("Expected sensor 'simulated', got '%v'", response["sensor"])
+	if response["sensor"] != "connected" {
+		t.Errorf("Expected sensor 'connected', got '%v'", response["sensor"])
 	}
 }
 
 func TestHandleRoot_HTML(t *testing.T) {
 	sensor := &MockSensorProvider{}
-	server := NewServer(sensor, false, nil)
+	server := NewServer(sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -228,65 +265,9 @@ func TestHandleRoot_HTML(t *testing.T) {
 	}
 }
 
-func TestHandleRoot_JSON(t *testing.T) {
-	sensor := &MockSensorProvider{}
-	server := NewServer(sensor, false, nil)
-
-	req := httptest.NewRequest(http.MethodGet, "/?format=json", nil)
-	w := httptest.NewRecorder()
-
-	server.handleRoot(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", w.Code)
-	}
-
-	var response map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatal("Failed to decode JSON response:", err)
-	}
-
-	if response["service"] != "Atmosbyte Weather API" {
-		t.Errorf("Expected service name, got '%v'", response["service"])
-	}
-
-	endpoints, ok := response["endpoints"].(map[string]interface{})
-	if !ok {
-		t.Fatal("Expected endpoints to be a map")
-	}
-
-	if endpoints["/measurements"] == nil {
-		t.Error("Expected /measurements endpoint to be documented")
-	}
-}
-
-func TestHandleRoot_JSONAcceptHeader(t *testing.T) {
-	sensor := &MockSensorProvider{}
-	server := NewServer(sensor, false, nil)
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("Accept", "application/json")
-	w := httptest.NewRecorder()
-
-	server.handleRoot(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", w.Code)
-	}
-
-	var response map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatal("Failed to decode JSON response:", err)
-	}
-
-	if response["service"] != "Atmosbyte Weather API" {
-		t.Errorf("Expected service name, got '%v'", response["service"])
-	}
-}
-
 func TestShutdown(t *testing.T) {
 	sensor := &MockSensorProvider{}
-	server := NewServer(sensor, false, nil)
+	server := NewServer(sensor, nil, queueProvider)
 
 	// Start server in background
 	go func() {
@@ -314,7 +295,7 @@ func BenchmarkHandleMeasurements(b *testing.B) {
 	}
 
 	sensor := &MockSensorProvider{measurement: measurement}
-	server := NewServer(sensor, false, nil)
+	server := NewServer(sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/measurements", nil)
 

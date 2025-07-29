@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/anibaldeboni/zero-paper/atmosbyte/bme280"
+	"github.com/anibaldeboni/zero-paper/atmosbyte/queue"
 )
 
 //go:embed templates/index.html
@@ -22,17 +23,20 @@ var (
 	systemStartTime = time.Now()
 )
 
-// SensorProvider defines the interface for retrieving sensor measurements
-type SensorProvider interface {
-	Read() (bme280.Measurement, error)
-}
-
 // Server encapsulates the HTTP server configuration and dependencies
 type Server struct {
-	server       *http.Server
-	sensor       SensorProvider
-	useSimulated bool
-	template     *template.Template
+	config   *Config
+	htmlData *TemplateData
+	sensor   bme280.Reader
+	template *template.Template
+	server   *http.Server
+	routes   map[string]string  // Armazena as rotas e suas descrições
+	queue    QueueStatsProvider // Interface para obter estatísticas da fila
+}
+
+// QueueStatsProvider define a interface para obter estatísticas da fila
+type QueueStatsProvider interface {
+	Stats() queue.QueueStats
 }
 
 // Config holds configuration options for the web server
@@ -72,10 +76,13 @@ type ErrorResponse struct {
 // TemplateData holds data passed to HTML templates
 type TemplateData struct {
 	SystemStartTime string
+	Routes          map[string]string
+	QueueAvailable  bool
 }
 
 // NewServer creates a new HTTP server instance with the given sensor provider
-func NewServer(sensor SensorProvider, useSimulated bool, config *Config) *Server {
+// Optionally accepts a queue parameter for queue monitoring functionality
+func NewServer(sensor bme280.Reader, config *Config, queue QueueStatsProvider) *Server {
 	if config == nil {
 		config = DefaultConfig()
 	}
@@ -87,9 +94,16 @@ func NewServer(sensor SensorProvider, useSimulated bool, config *Config) *Server
 	}
 
 	s := &Server{
-		sensor:       sensor,
-		useSimulated: useSimulated,
-		template:     tmpl,
+		config:   config,
+		sensor:   sensor,
+		template: tmpl,
+		queue:    queue,
+		routes: map[string]string{
+			"/":             "Interface web principal",
+			"/health":       "Status de saúde do sistema",
+			"/measurements": "Dados atuais do sensor (JSON)",
+			"/queue":        "Status da fila de processamento (JSON)",
+		},
 	}
 
 	mux := http.NewServeMux()
@@ -110,7 +124,13 @@ func NewServer(sensor SensorProvider, useSimulated bool, config *Config) *Server
 func (s *Server) setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/measurements", s.handleMeasurements)
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/queue", s.handleQueue)
 	mux.HandleFunc("/", s.handleRoot)
+}
+
+// GetRoutes returns the configured routes and their descriptions
+func (s *Server) GetRoutes() map[string]string {
+	return s.routes
 }
 
 // Start starts the HTTP server
@@ -150,17 +170,12 @@ func (s *Server) handleMeasurements(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	source := "BME280"
-	if s.useSimulated {
-		source = "Simulated"
-	}
-
 	response := MeasurementResponse{
 		Timestamp:   time.Now(),
 		Temperature: measurement.Temperature,
 		Humidity:    measurement.Humidity,
 		Pressure:    float64(measurement.Pressure),
-		Source:      source,
+		Source:      "BME280",
 	}
 
 	s.sendJSONResponse(w, response, http.StatusOK)
@@ -182,6 +197,30 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.sendJSONResponse(w, health, http.StatusOK)
 }
 
+// handleQueue handles GET /queue - returns queue status
+func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.sendErrorResponse(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.queue == nil {
+		s.sendErrorResponse(w, "Queue not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	stats := s.queue.Stats()
+	response := map[string]any{
+		"queue_size":            stats.QueueSize,
+		"retry_queue_size":      stats.RetryQueueSize,
+		"circuit_breaker_state": int(stats.CircuitBreakerState),
+		"workers":               stats.Workers,
+		"timestamp":             time.Now(),
+	}
+
+	s.sendJSONResponse(w, response, http.StatusOK)
+}
+
 // handleRoot handles GET / - returns HTML page with weather information
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -189,15 +228,11 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if the request wants JSON (API client)
-	if r.Header.Get("Accept") == "application/json" || r.URL.Query().Get("format") == "json" {
-		s.handleAPIInfo(w, r)
-		return
-	}
-
 	// Serve HTML page
 	data := TemplateData{
 		SystemStartTime: systemStartTime.Format("02/01/2006 15:04:05"),
+		Routes:          s.GetRoutes(),
+		QueueAvailable:  s.queue != nil,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -208,34 +243,13 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleAPIInfo handles API information requests (JSON format)
-func (s *Server) handleAPIInfo(w http.ResponseWriter, _ *http.Request) {
-	info := map[string]any{
-		"service":   "Atmosbyte Weather API",
-		"version":   "1.0.0",
-		"timestamp": time.Now(),
-		"endpoints": map[string]string{
-			"/":             "Web interface / API information",
-			"/health":       "Health check",
-			"/measurements": "Current sensor measurements",
-		},
-	}
-
-	s.sendJSONResponse(w, info, http.StatusOK)
-}
-
 // getSensorStatus returns the current sensor status
 func (s *Server) getSensorStatus() string {
-	if s.useSimulated {
-		return "simulated"
-	}
-
 	// Try to read from sensor to check if it's working
 	_, err := s.sensor.Read()
 	if err != nil {
 		return "error"
 	}
-
 	return "connected"
 }
 

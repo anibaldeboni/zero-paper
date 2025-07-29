@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Atmosbyte - Monitoramento Meteorológico</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
     <style>
       * {
         margin: 0;
@@ -12,7 +18,8 @@
       }
 
       body {
-        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+          Roboto, sans-serif;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         min-height: 100vh;
         color: #333;
@@ -32,6 +39,7 @@
 
       .header h1 {
         font-size: 3rem;
+        font-weight: 700;
         margin-bottom: 10px;
         text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
       }
@@ -66,6 +74,7 @@
       .weather-card h3 {
         color: #5a67d8;
         font-size: 1.3rem;
+        font-weight: 600;
         margin-bottom: 15px;
         display: flex;
         align-items: center;
@@ -74,7 +83,7 @@
 
       .weather-value {
         font-size: 2.5rem;
-        font-weight: bold;
+        font-weight: 700;
         color: #2d3748;
         margin-bottom: 10px;
       }
@@ -115,7 +124,7 @@
       }
 
       .status-value {
-        font-weight: bold;
+        font-weight: 600;
         font-size: 1.1rem;
         color: #2d3748;
       }
@@ -147,6 +156,7 @@
 
       .api-info h3 {
         color: #5a67d8;
+        font-weight: 600;
         margin-bottom: 15px;
       }
 
@@ -168,12 +178,12 @@
       }
 
       .endpoint-path {
-        font-family: "Courier New", monospace;
+        font-family: "JetBrains Mono", "Courier New", monospace;
         background: #f7fafc;
         padding: 4px 8px;
         border-radius: 4px;
         color: #5a67d8;
-        font-weight: bold;
+        font-weight: 500;
       }
 
       .endpoint-desc {
@@ -206,8 +216,25 @@
       }
 
       @media (max-width: 768px) {
+        .container {
+          padding: 15px;
+        }
+
+        .header {
+          margin-bottom: 30px;
+        }
+
         .header h1 {
           font-size: 2rem;
+        }
+
+        .header p {
+          font-size: 1rem;
+        }
+
+        .weather-grid {
+          gap: 15px;
+          margin-bottom: 30px;
         }
 
         .weather-card {
@@ -216,6 +243,61 @@
 
         .weather-value {
           font-size: 2rem;
+        }
+
+        .status-bar {
+          padding: 15px;
+          margin-bottom: 20px;
+        }
+
+        .status-grid {
+          grid-template-columns: 1fr;
+          gap: 15px;
+        }
+
+        .api-info {
+          padding: 20px;
+        }
+
+        .endpoint {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 5px;
+        }
+
+        .endpoint-path {
+          font-size: 0.9rem;
+        }
+
+        .endpoint-desc {
+          font-size: 0.8rem;
+        }
+      }
+
+      @media (max-width: 480px) {
+        .container {
+          padding: 10px;
+        }
+
+        .weather-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .weather-card {
+          padding: 15px;
+        }
+
+        .weather-value {
+          font-size: 1.8rem;
+        }
+
+        .header h1 {
+          font-size: 1.8rem;
+        }
+
+        .refresh-btn {
+          padding: 10px 25px;
+          font-size: 0.9rem;
         }
       }
 
@@ -263,6 +345,15 @@
             <div class="status-label">Última Atualização</div>
             <div class="status-value" id="last-update">Carregando...</div>
           </div>
+          {{if .QueueAvailable}}
+          <div class="status-item">
+            <div class="status-label">Fila de Processamento</div>
+            <div class="status-value" id="queue-status">
+              <span class="status-indicator status-connected"></span>
+              <span id="queue-text">Carregando...</span>
+            </div>
+          </div>
+          {{end}}
         </div>
       </div>
 
@@ -302,18 +393,12 @@
       <div class="api-info">
         <h3>📡 Endpoints da API</h3>
         <div class="api-endpoints">
+          {{range $path, $desc := .Routes}}
           <div class="endpoint">
-            <span class="endpoint-path">GET /</span>
-            <span class="endpoint-desc">Interface web principal</span>
+            <span class="endpoint-path">GET {{$path}}</span>
+            <span class="endpoint-desc">{{$desc}}</span>
           </div>
-          <div class="endpoint">
-            <span class="endpoint-path">GET /measurements</span>
-            <span class="endpoint-desc">Dados atuais do sensor (JSON)</span>
-          </div>
-          <div class="endpoint">
-            <span class="endpoint-path">GET /health</span>
-            <span class="endpoint-desc">Status de saúde do sistema</span>
-          </div>
+          {{end}}
         </div>
       </div>
 
@@ -348,6 +433,19 @@
           return await response.json();
         } catch (error) {
           console.error("Erro ao buscar status:", error);
+          throw error;
+        }
+      }
+
+      async function fetchQueueStatus() {
+        try {
+          const response = await fetch("/queue");
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+          return await response.json();
+        } catch (error) {
+          console.error("Erro ao buscar status da fila:", error);
           throw error;
         }
       }
@@ -390,6 +488,24 @@
         }
       }
 
+      function updateQueueStatus(queueData) {
+        const queueElement = document.getElementById("queue-text");
+        if (!queueElement) return; // Queue not available
+
+        const { queue_size, retry_queue_size, circuit_breaker_state, workers } =
+          queueData;
+
+        // Mapear estados do circuit breaker
+        const stateNames = {
+          0: "Fechado",
+          1: "Aberto",
+          2: "Meio-Aberto",
+        };
+
+        const stateName = stateNames[circuit_breaker_state] || "Desconhecido";
+        queueElement.textContent = `${queue_size} itens (${stateName})`;
+      }
+
       function showError(message) {
         const container = document.getElementById("error-container");
         container.innerHTML = `<div class="error-message">❌ ${message}</div>`;
@@ -412,13 +528,22 @@
         setLoading(true);
 
         try {
-          const [measurements, health] = await Promise.all([
-            fetchMeasurements(),
-            fetchHealth(),
-          ]);
+          const promises = [fetchMeasurements(), fetchHealth()];
+
+          const queueAvailable = "{{.QueueAvailable}}" === "true";
+          if (queueAvailable) {
+            promises.push(fetchQueueStatus());
+          }
+
+          const results = await Promise.all(promises);
+          const [measurements, health] = results;
 
           updateWeatherData(measurements);
           updateSensorStatus(health.sensor);
+
+          if (queueAvailable && results.length > 2) {
+            updateQueueStatus(results[2]);
+          }
 
           // Clear any previous errors
           document.getElementById("error-container").innerHTML = "";
