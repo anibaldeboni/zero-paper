@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+
 	"github.com/anibaldeboni/zero-paper/atmosbyte/bme280"
 	"github.com/anibaldeboni/zero-paper/atmosbyte/queue"
 )
@@ -18,6 +20,6 @@ type MeasurementWorker = queue.Worker[bme280.Measurement]
 type MeasurementWorkerFunc = queue.WorkerFunc[bme280.Measurement]
 
 // NewMeasurementQueue cria uma nova fila para Measurement
-func NewMeasurementQueue(worker MeasurementWorker, config queue.QueueConfig) *MeasurementQueue {
-	return queue.NewQueue(worker, config)
+func NewMeasurementQueue(ctx context.Context, worker MeasurementWorker, config queue.QueueConfig) *MeasurementQueue {
+	return queue.NewQueue(ctx, worker, config)
 }

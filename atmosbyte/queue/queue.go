@@ -242,8 +242,8 @@ type Queue[T any] struct {
 }
 
 // NewQueue cria uma nova instância da fila
-func NewQueue[T any](worker Worker[T], config QueueConfig) *Queue[T] {
-	ctx, cancel := context.WithCancel(context.Background())
+func NewQueue[T any](ctx context.Context, worker Worker[T], config QueueConfig) *Queue[T] {
+	queueCtx, cancel := context.WithCancel(ctx)
 
 	q := &Queue[T]{
 		config:     config,
@@ -254,7 +254,7 @@ func NewQueue[T any](worker Worker[T], config QueueConfig) *Queue[T] {
 			config.CircuitBreakerConfig.FailureThreshold,
 			config.CircuitBreakerConfig.Timeout,
 		),
-		ctx:    ctx,
+		ctx:    queueCtx,
 		cancel: cancel,
 	}
 

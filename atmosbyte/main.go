@@ -118,8 +118,12 @@ func main() {
 	config.RetryPolicy.MaxRetries = 3
 	config.RetryPolicy.BaseDelay = 5 * time.Second
 
-	// Cria a fila para processar measurements
-	q := NewMeasurementQueue(worker, config)
+	// Configura graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Cria a fila para processar measurements (agora com contexto)
+	q := NewMeasurementQueue(ctx, worker, config)
 
 	// Cria o worker do sensor
 	var (
@@ -147,10 +151,6 @@ func main() {
 	}
 
 	webServer := web.NewServer(environmentalSensor, nil, q)
-
-	// Configura graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)

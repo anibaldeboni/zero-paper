@@ -134,7 +134,7 @@ func TestQueue_Basic(t *testing.T) {
 	config.Workers = 1
 	config.BufferSize = 10
 
-	q := queue.NewQueue[OrderData](worker, config)
+	q := queue.NewQueue(context.Background(), worker, config)
 	defer q.Close()
 
 	// Testa enqueue básico
@@ -185,7 +185,7 @@ func TestQueue_Retry(t *testing.T) {
 	config.RetryPolicy.MaxRetries = 3
 	config.RetryPolicy.BaseDelay = 10 * time.Millisecond
 
-	q := queue.NewQueue(worker, config)
+	q := queue.NewQueue(context.Background(), worker, config)
 	defer q.Close()
 
 	measurement := OrderData{
@@ -353,7 +353,7 @@ func TestGenericQueue_CustomType_Main(t *testing.T) {
 	config.RetryPolicy.BaseDelay = 10 * time.Millisecond
 
 	// Cria uma fila genérica para OrderData
-	q := queue.NewQueue(worker, config)
+	q := queue.NewQueue(context.Background(), worker, config)
 	defer q.Close()
 
 	// Testa com pedido normal (sucesso)
@@ -423,7 +423,7 @@ func TestGenericQueue_WorkerFunc_QueueTest(t *testing.T) {
 	config.BufferSize = 10
 
 	// Cria uma fila genérica para strings
-	q := queue.NewQueue(workerFunc, config)
+	q := queue.NewQueue(context.Background(), workerFunc, config)
 	defer q.Close()
 
 	// Envia algumas mensagens
@@ -493,7 +493,7 @@ func TestGenericQueue_RetryBehavior_Local(t *testing.T) {
 	config.RetryPolicy.MaxRetries = 3
 	config.RetryPolicy.BaseDelay = 10 * time.Millisecond
 
-	q := queue.NewQueue(worker, config)
+	q := queue.NewQueue(context.Background(), worker, config)
 	defer q.Close()
 
 	order := OrderData{
@@ -543,7 +543,7 @@ func TestGenericQueue_EventData_Complete(t *testing.T) {
 	config.Workers = 2
 	config.BufferSize = 10
 
-	q := queue.NewQueue(eventWorker, config)
+	q := queue.NewQueue(context.Background(), eventWorker, config)
 	defer q.Close()
 
 	// Envia alguns eventos
