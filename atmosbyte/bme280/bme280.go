@@ -3,7 +3,9 @@ package bme280
 import (
 	"errors"
 	"fmt"
+	"math/rand"
 	"sync"
+	"time"
 
 	"periph.io/x/conn/v3/i2c"
 	"periph.io/x/conn/v3/i2c/i2creg"
@@ -84,21 +86,21 @@ func NewSensor(config *Config) (*Sensor, error) {
 }
 
 // Read realiza uma leitura do sensor e retorna os dados de medição
-func (s *Sensor) Read() (*Measurement, error) {
+func (s *Sensor) Read() (Measurement, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	if s.device == nil {
-		return nil, errors.New("sensor not initialized")
+		return Measurement{}, errors.New("sensor not initialized")
 	}
 
 	var env physic.Env
 	if err := s.device.Sense(&env); err != nil {
-		return nil, fmt.Errorf("failed to read sensor data: %w", err)
+		return Measurement{}, fmt.Errorf("failed to read sensor data: %w", err)
 	}
 
 	// Converte os valores para as unidades desejadas
-	measurement := &Measurement{
+	measurement := Measurement{
 		Temperature: float64(env.Temperature) / float64(physic.Celsius), // Celsius
 		Humidity:    float64(env.Humidity) / float64(physic.PercentRH),  // Porcentagem
 		Pressure:    int64(env.Pressure) / int64(physic.Pascal),         // Pascal
@@ -140,3 +142,110 @@ func (m *Measurement) String() string {
 	return fmt.Sprintf("Temperature: %.2f°C, Humidity: %.2f%%, Pressure: %d Pa",
 		m.Temperature, m.Humidity, m.Pressure)
 }
+
+// Provider defines the interface for BME280 measurement providers
+// This allows for both hardware and simulated implementations
+type Provider interface {
+	Close() error
+}
+
+// Reader defines the interface for reading measurements
+// Hardware sensor returns pointer, simulated returns value
+type Reader interface {
+	Read() (Measurement, error)
+}
+
+// SimulatedSensor provides simulated BME280 sensor data for testing and development
+type SimulatedSensor struct {
+	config *SimulatedConfig
+	rand   *rand.Rand
+	mu     sync.RWMutex
+	closed bool
+}
+
+// SimulatedConfig holds configuration for the simulated sensor
+type SimulatedConfig struct {
+	// Temperature range in Celsius
+	MinTemp float64
+	MaxTemp float64
+	// Humidity range in percentage
+	MinHumidity float64
+	MaxHumidity float64
+	// Pressure range in Pascal
+	MinPressure int64
+	MaxPressure int64
+	// Random seed (0 for time-based)
+	Seed int64
+}
+
+// DefaultSimulatedConfig returns sensible defaults for simulated sensor
+func DefaultSimulatedConfig() *SimulatedConfig {
+	return &SimulatedConfig{
+		MinTemp:     15.0,   // 15°C
+		MaxTemp:     35.0,   // 35°C
+		MinHumidity: 30.0,   // 30%
+		MaxHumidity: 80.0,   // 80%
+		MinPressure: 95000,  // 95kPa
+		MaxPressure: 105000, // 105kPa
+		Seed:        0,      // Use current time
+	}
+}
+
+// NewSimulatedSensor creates a new simulated BME280 sensor
+func NewSimulatedSensor(config *SimulatedConfig) *SimulatedSensor {
+	if config == nil {
+		config = DefaultSimulatedConfig()
+	}
+
+	seed := config.Seed
+	if seed == 0 {
+		seed = time.Now().UnixNano()
+	}
+
+	return &SimulatedSensor{
+		config: config,
+		rand:   rand.New(rand.NewSource(seed)),
+	}
+}
+
+// Read implements Provider interface with simulated data
+func (s *SimulatedSensor) Read() (Measurement, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.closed {
+		return Measurement{}, errors.New("simulated sensor is closed")
+	}
+
+	// Generate realistic readings with some variation
+	tempRange := s.config.MaxTemp - s.config.MinTemp
+	temp := s.config.MinTemp + s.rand.Float64()*tempRange
+
+	humidityRange := s.config.MaxHumidity - s.config.MinHumidity
+	humidity := s.config.MinHumidity + s.rand.Float64()*humidityRange
+
+	pressureRange := float64(s.config.MaxPressure - s.config.MinPressure)
+	pressure := s.config.MinPressure + int64(s.rand.Float64()*pressureRange)
+
+	return Measurement{
+		Temperature: temp,
+		Humidity:    humidity,
+		Pressure:    pressure,
+	}, nil
+}
+
+// Close implements Provider interface
+func (s *SimulatedSensor) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.closed = true
+	return nil
+}
+
+// Ensure both implementations satisfy their respective interfaces
+var (
+	_ Provider = (*Sensor)(nil)
+	_ Provider = (*SimulatedSensor)(nil)
+	_ Reader   = (*SimulatedSensor)(nil)
+)

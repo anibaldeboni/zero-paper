@@ -186,3 +186,133 @@ func BenchmarkDefaultConfig(b *testing.B) {
 		_ = DefaultConfig()
 	}
 }
+
+func TestSimulatedSensor(t *testing.T) {
+	config := DefaultSimulatedConfig()
+	sensor := NewSimulatedSensor(config)
+	defer sensor.Close()
+
+	// Test basic reading
+	measurement, err := sensor.Read()
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	// Validate temperature range
+	if measurement.Temperature < config.MinTemp || measurement.Temperature > config.MaxTemp {
+		t.Errorf("Temperature %f out of range [%f, %f]",
+			measurement.Temperature, config.MinTemp, config.MaxTemp)
+	}
+
+	// Validate humidity range
+	if measurement.Humidity < config.MinHumidity || measurement.Humidity > config.MaxHumidity {
+		t.Errorf("Humidity %f out of range [%f, %f]",
+			measurement.Humidity, config.MinHumidity, config.MaxHumidity)
+	}
+
+	// Validate pressure range
+	if measurement.Pressure < config.MinPressure || measurement.Pressure > config.MaxPressure {
+		t.Errorf("Pressure %d out of range [%d, %d]",
+			measurement.Pressure, config.MinPressure, config.MaxPressure)
+	}
+}
+
+func TestSimulatedSensorConfig(t *testing.T) {
+	// Test with nil config (should use defaults)
+	sensor1 := NewSimulatedSensor(nil)
+	defer sensor1.Close()
+
+	measurement1, err := sensor1.Read()
+	if err != nil {
+		t.Fatalf("Expected no error with nil config, got %v", err)
+	}
+
+	// Should be within default ranges
+	if measurement1.Temperature < 15.0 || measurement1.Temperature > 35.0 {
+		t.Errorf("Temperature with default config out of expected range: %f", measurement1.Temperature)
+	}
+
+	// Test with custom config
+	customConfig := &SimulatedConfig{
+		MinTemp:     20.0,
+		MaxTemp:     25.0,
+		MinHumidity: 40.0,
+		MaxHumidity: 60.0,
+		MinPressure: 100000,
+		MaxPressure: 102000,
+		Seed:        12345, // Fixed seed for reproducible tests
+	}
+
+	sensor2 := NewSimulatedSensor(customConfig)
+	defer sensor2.Close()
+
+	measurement2, err := sensor2.Read()
+	if err != nil {
+		t.Fatalf("Expected no error with custom config, got %v", err)
+	}
+
+	// Should be within custom ranges
+	if measurement2.Temperature < customConfig.MinTemp || measurement2.Temperature > customConfig.MaxTemp {
+		t.Errorf("Temperature %f out of custom range [%f, %f]",
+			measurement2.Temperature, customConfig.MinTemp, customConfig.MaxTemp)
+	}
+}
+
+func TestSimulatedSensorReproducibility(t *testing.T) {
+	// Test that same seed produces same results
+	config := &SimulatedConfig{
+		Seed: 12345,
+	}
+
+	sensor1 := NewSimulatedSensor(config)
+	measurement1, _ := sensor1.Read()
+	sensor1.Close()
+
+	sensor2 := NewSimulatedSensor(config)
+	measurement2, _ := sensor2.Read()
+	sensor2.Close()
+
+	if measurement1.Temperature != measurement2.Temperature {
+		t.Errorf("Expected same temperature with same seed, got %f vs %f",
+			measurement1.Temperature, measurement2.Temperature)
+	}
+}
+
+func TestSimulatedSensorClosed(t *testing.T) {
+	sensor := NewSimulatedSensor(nil)
+
+	// Should work before closing
+	_, err := sensor.Read()
+	if err != nil {
+		t.Fatalf("Expected no error before closing, got %v", err)
+	}
+
+	// Close the sensor
+	err = sensor.Close()
+	if err != nil {
+		t.Fatalf("Expected no error closing sensor, got %v", err)
+	}
+
+	// Should error after closing
+	_, err = sensor.Read()
+	if err == nil {
+		t.Error("Expected error reading from closed sensor")
+	}
+
+	if err.Error() != "simulated sensor is closed" {
+		t.Errorf("Expected specific error message, got %v", err)
+	}
+}
+
+func BenchmarkSimulatedSensorRead(b *testing.B) {
+	sensor := NewSimulatedSensor(nil)
+	defer sensor.Close()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := sensor.Read()
+		if err != nil {
+			b.Fatalf("Benchmark error: %v", err)
+		}
+	}
+}

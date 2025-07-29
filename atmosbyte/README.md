@@ -37,25 +37,26 @@ A comprehensive weather data collection, processing, and visualization system bu
 ```
 atmosbyte/
 ├── bme280/                    # BME280 sensor package
-│   ├── bme280.go             # Core implementation
-│   ├── bme280_test.go        # Unit tests
-│   └── example/              # Usage examples
-├── queue/                     # Generic queue system
-│   ├── queue.go              # Core queue implementation
-│   └── queue_test.go         # Comprehensive tests
-├── openweather/              # OpenWeather API client
-│   └── openweather.go        # HTTP client and workers
-├── web/                       # Web interface package
-│   ├── web.go                # HTTP server and handlers
-│   ├── web_test.go           # Web interface tests
-│   └── templates/            # HTML templates
-│       └── index.html        # Main dashboard template
-├── sensor_worker.go          # Sensor data collection workers
-├── web_adapters.go           # Adapters for web interface
-├── ow_adapter.go             # OpenWeather adapter
-├── main.go                   # Main application coordinator
-├── go.mod                    # Go module definition
-└── .env.example              # Environment configuration example
+│   ├── bme280.go             # Core sensor implementation with I2C communication
+│   └── bme280_test.go        # Comprehensive unit tests and benchmarks
+├── queue/                     # Generic queue system with retry logic
+│   ├── queue.go              # Core queue implementation with circuit breaker
+│   └── queue_test.go         # Comprehensive test suite with retry scenarios
+├── openweather/              # OpenWeather API client package
+│   └── openweather.go        # HTTP client for weather station API
+├── web/                       # Real-time web interface package
+│   ├── web.go                # HTTP server, REST API handlers, and queue monitoring
+│   ├── web_test.go           # HTTP handler tests and API validation
+│   └── templates/            # HTML templates for web interface
+│       └── index.html        # Main dashboard with live data and queue status
+├── main.go                   # Application coordinator and OpenWeather worker
+├── sensor_worker.go          # Sensor data collection workers (BME280/simulated)
+├── queue.go                  # Queue type definitions and message structures
+├── queue_worker.go           # Queue worker implementation for measurement processing
+├── go.mod                    # Go module definition and dependencies
+├── go.sum                    # Dependency checksums
+├── .env.example              # Environment configuration template
+└── README.md                 # This comprehensive documentation
 ```
 
 ## 🚀 Quick Start
@@ -114,7 +115,7 @@ Once running, open your browser to:
 - **API Endpoints**:
   - http://localhost:8080/measurements (JSON)
   - http://localhost:8080/health (JSON)
-  - http://localhost:8080/?format=json (API info)
+  - http://localhost:8080/queue (JSON)
 
 ## 💻 Usage Examples
 
@@ -149,8 +150,8 @@ curl http://localhost:8080/measurements
 # Check system health
 curl http://localhost:8080/health
 
-# Get API information
-curl http://localhost:8080/?format=json
+# Get queue processing status
+curl http://localhost:8080/queue
 ```
 
 ## 🌐 Web Interface Features
@@ -159,16 +160,18 @@ curl http://localhost:8080/?format=json
 
 - **Live Data Display**: Temperature, humidity, and pressure with auto-refresh
 - **Sensor Status**: Visual indicators for hardware/simulated sensor status
+- **Queue Monitoring**: Real-time queue status with circuit breaker state
 - **System Monitoring**: Real-time system health and last update timestamps
 - **Responsive Design**: Works on desktop, tablet, and mobile devices
 
 ### **REST API Endpoints**
 
-| Endpoint        | Method | Description                             | Response Format |
-| --------------- | ------ | --------------------------------------- | --------------- |
-| `/`             | GET    | Web dashboard (HTML) or API info (JSON) | HTML/JSON       |
-| `/measurements` | GET    | Current sensor readings                 | JSON            |
-| `/health`       | GET    | System health status                    | JSON            |
+| Endpoint        | Method | Description                            | Response Format |
+| --------------- | ------ | -------------------------------------- | --------------- |
+| `/`             | GET    | Web dashboard (HTML)                   | HTML            |
+| `/measurements` | GET    | Current sensor readings                | JSON            |
+| `/health`       | GET    | System health status                   | JSON            |
+| `/queue`        | GET    | Queue processing status and statistics | JSON            |
 
 ### **API Response Examples**
 
@@ -191,6 +194,18 @@ curl http://localhost:8080/?format=json
   "status": "healthy",
   "timestamp": "2025-07-28T14:30:00Z",
   "sensor": "connected"
+}
+```
+
+**Queue Endpoint:**
+
+```json
+{
+  "queue_size": 0,
+  "retry_queue_size": 0,
+  "circuit_breaker_state": 0,
+  "workers": 2,
+  "timestamp": "2025-07-29T14:30:00Z"
 }
 ```
 
@@ -325,7 +340,7 @@ func (a *CustomWebAdapter) Read() (bme280.Measurement, error) {
 
 ```go
 customWorker := NewCustomSensorWorker(params)
-sensorManager := NewSensorManager(customWorker)
+// Use the worker directly without SensorManager
 ```
 
 ### Adding New Data Destinations
@@ -406,18 +421,21 @@ Queue stats - CircuitBreaker: Open
 ### Data Flow
 
 ```
-[BME280/Simulated] → [SensorWorker] → [Queue] → [OpenWeatherWorker] → [API]
+[BME280/Simulated] → [SensorWorker] → [Queue] → [OpenWeatherWorker] → [OpenWeather API]
                          ↓
-                   [Web Interface] ← [WebAdapter] ← [Live Data]
+                   [Web Interface] ← [Direct Sensor Access] ← [Live Data]
+                         ↓
+                   [Queue Status API] ← [Queue Monitoring] ← [Queue Stats]
 ```
 
 ### Component Interaction
 
-1. **Sensor Layer**: BME280 or simulated sensor provides measurements
-2. **Collection Layer**: SensorWorker collects data at intervals
-3. **Queue Layer**: Generic queue with retry/circuit breaker patterns
-4. **Processing Layer**: OpenWeatherWorker sends data to external API
-5. **Web Layer**: Real-time interface serves live data to users
+1. **Sensor Layer**: BME280 or simulated sensor provides real-time measurements
+2. **Collection Layer**: SensorWorker collects data at configurable intervals
+3. **Queue Layer**: Generic queue system with retry logic and circuit breaker protection
+4. **Processing Layer**: OpenWeatherWorker (in main.go) processes queue messages and sends to API
+5. **Web Layer**: Real-time interface with direct sensor access and queue monitoring
+6. **API Layer**: RESTful endpoints for measurements, health, and queue status
 
 ### Design Principles
 

@@ -37,9 +37,8 @@ func main() {
 		log.Fatal("Failed to create OpenWeather client:", err)
 	}
 
-	// Cria o worker OpenWeather
-	owWorker := openweather.NewOpenWeatherWorker(client, stationID)
-	worker := NewOpenWeatherWorkerAdapter(owWorker)
+	// Cria o worker OpenWeather diretamente
+	worker := NewOpenWeatherWorker(client, stationID)
 
 	// Configuração da fila
 	config := queue.DefaultQueueConfig()
@@ -51,16 +50,18 @@ func main() {
 	// Cria a fila para processar measurements
 	q := NewMeasurementQueue(worker, config)
 
-	// Cria o gerenciador de sensor
-	var sensorManager *SensorManager
-	var webSensor web.SensorProvider
+	// Cria o worker do sensor
+	var (
+		sensorWorker        *SensorWorker
+		environmentalSensor bme280.Reader
+	)
 
 	if useSimulated {
 		log.Println("Using simulated sensor data")
-		simWorker := NewSimulatedSensorWorker(q, 10*time.Second)
-		sensorManager = NewSensorManager(simWorker)
-		// Usa um sensor simulado também para o web server
-		webSensor = NewSimulatedWebSensor()
+		simSensor := bme280.NewSimulatedSensor(nil)
+		sensorWorker = NewSensorWorker(simSensor, q, 10*time.Second, "Simulated")
+		// Usa o mesmo sensor simulado para o web server
+		environmentalSensor = simSensor
 	} else {
 		log.Println("Attempting to use BME280 hardware sensor")
 		sensor, err := bme280.NewSensor(bme280.DefaultConfig())
@@ -68,16 +69,13 @@ func main() {
 			log.Fatalf("Failed to initialize BME280 sensor: %v", err)
 		} else {
 			log.Println("BME280 sensor initialized successfully")
-			bmeWorker := NewBME280SensorWorker(sensor, q, time.Minute)
-			sensorManager = NewSensorManager(bmeWorker)
-			webSensor = NewBME280WebAdapter(sensor)
+			sensorWorker = NewSensorWorker(sensor, q, time.Minute, "BME280")
+			environmentalSensor = sensor
 			defer sensor.Close()
 		}
 	}
 
-	// Cria e configura o servidor web
-	webConfig := web.DefaultConfig()
-	webServer := web.NewServer(webSensor, useSimulated, webConfig)
+	webServer := web.NewServer(environmentalSensor, nil, q)
 
 	// Configura graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -88,62 +86,44 @@ func main() {
 
 	// Inicia o sensor em uma goroutine
 	go func() {
-		if err := sensorManager.Start(ctx); err != nil && err != context.Canceled {
-			log.Printf("Sensor manager error: %v", err)
+		if err := sensorWorker.Start(ctx); err != nil && err != context.Canceled {
+			log.Printf("Sensor worker error: %v", err)
 		}
 	}()
 
 	// Inicia o servidor web em uma goroutine
 	go func() {
 		if err := webServer.Start(); err != nil {
-			log.Printf("❌ Web server error: %v", err)
-		}
-	}()
-
-	// Monitora estatísticas da fila
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				stats := q.Stats()
-				log.Printf("📊 Queue stats - Size: %d, Retry: %d, CircuitBreaker: %v, Workers: %d",
-					stats.QueueSize, stats.RetryQueueSize, stats.CircuitBreakerState, stats.Workers)
-
-			case <-ctx.Done():
-				return
-			}
+			log.Printf("Web server error: %v", err)
 		}
 	}()
 
 	// Aguarda sinal de shutdown
 	<-sigChan
-	log.Println("🛑 Shutdown signal received...")
+	log.Println("Shutdown signal received...")
 
-	// Para o sensor manager
-	sensorManager.Stop()
+	// Para o sensor worker
+	sensorWorker.Stop()
 
 	// Para o servidor web graciosamente
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
 	if err := webServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("❌ Error shutting down web server: %v", err)
+		log.Printf("Error shutting down web server: %v", err)
 	}
 
 	cancel() // cancela o context para parar todas as goroutines
 
 	// Aguarda um pouco para processar mensagens pendentes
-	log.Println("⏳ Waiting for pending messages...")
+	log.Println("Waiting for pending messages...")
 	time.Sleep(5 * time.Second)
 
 	// Fecha a fila graciosamente
-	log.Println("🔄 Closing queue...")
+	log.Println("Closing queue...")
 	if err := q.Close(); err != nil {
-		log.Printf("❌ Error closing queue: %v", err)
+		log.Printf("Error closing queue: %v", err)
 	}
 
-	log.Println("✅ Shutdown completed")
+	log.Println("Shutdown completed")
 }

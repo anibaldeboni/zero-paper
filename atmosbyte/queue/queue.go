@@ -84,8 +84,7 @@ func DefaultRetryPolicy() RetryPolicy {
 
 // CalculateDelay calcula o delay para a próxima tentativa usando backoff exponential
 func (rp RetryPolicy) CalculateDelay(attempt int) time.Duration {
-	delay := min(rp.BaseDelay*time.Duration(1<<uint(attempt)), rp.MaxDelay)
-	return delay
+	return min(rp.BaseDelay*time.Duration(1<<uint(attempt)), rp.MaxDelay)
 }
 
 // ShouldRetry determina se um erro deve ser retentado usando a nova interface
