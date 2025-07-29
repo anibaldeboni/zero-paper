@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -14,8 +17,76 @@ import (
 	"github.com/anibaldeboni/zero-paper/atmosbyte/web"
 )
 
+// BuildInfo contém informações de versão da aplicação
+type BuildInfo struct {
+	Version   string
+	Commit    string
+	Date      string
+	GoVersion string
+	Module    string
+}
+
+// GetBuildInfo extrai informações de build usando debug.BuildInfo
+func GetBuildInfo() BuildInfo {
+	info := BuildInfo{
+		Version:   "dev",
+		Commit:    "unknown",
+		Date:      "unknown",
+		GoVersion: "unknown",
+		Module:    "unknown",
+	}
+
+	if buildInfo, ok := debug.ReadBuildInfo(); ok {
+		info.GoVersion = buildInfo.GoVersion
+		info.Module = buildInfo.Main.Path
+
+		// Se a versão do módulo principal estiver disponível
+		if buildInfo.Main.Version != "(devel)" && buildInfo.Main.Version != "" {
+			info.Version = buildInfo.Main.Version
+		}
+
+		// Extrai informações de VCS se disponíveis
+		for _, setting := range buildInfo.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				if len(setting.Value) >= 7 {
+					info.Commit = setting.Value[:7] // Short commit hash
+				} else {
+					info.Commit = setting.Value
+				}
+			case "vcs.time":
+				info.Date = setting.Value
+			}
+		}
+	}
+
+	return info
+}
+
+// PrintVersion exibe informações de versão formatadas
+func PrintVersion() {
+	buildInfo := GetBuildInfo()
+	fmt.Printf("Atmosbyte Weather Data Processing System\n")
+	fmt.Printf("Version: %s\n", buildInfo.Version)
+	fmt.Printf("Commit: %s\n", buildInfo.Commit)
+	fmt.Printf("Build Date: %s\n", buildInfo.Date)
+	fmt.Printf("Go Version: %s\n", buildInfo.GoVersion)
+	fmt.Printf("Module: %s\n", buildInfo.Module)
+}
+
 func main() {
-	log.Println("Starting Atmosbyte - Weather Data Processing System")
+	// Adiciona flag para mostrar versão
+	var showVersion = flag.Bool("version", false, "Show version information")
+	var showVersionShort = flag.Bool("v", false, "Show version information (short)")
+	flag.Parse()
+
+	if *showVersion || *showVersionShort {
+		PrintVersion()
+		return
+	}
+
+	buildInfo := GetBuildInfo()
+	log.Printf("Starting Atmosbyte %s %s %s", buildInfo.Version, buildInfo.Date, buildInfo.GoVersion)
 
 	// Configuração da API OpenWeather
 	appID := os.Getenv("OPENWEATHER_API_KEY")
