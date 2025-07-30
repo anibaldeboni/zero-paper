@@ -14,7 +14,6 @@ type SensorReader struct {
 	sensor   bme280.Reader
 	queue    *MeasurementQueue
 	interval time.Duration
-	stopCh   chan struct{}
 	name     string // nome do sensor para logs
 }
 
@@ -24,7 +23,6 @@ func NewSensorReader(sensor bme280.Reader, queue *MeasurementQueue, interval tim
 		sensor:   sensor,
 		queue:    queue,
 		interval: interval,
-		stopCh:   make(chan struct{}),
 		name:     name,
 	}
 }
@@ -39,12 +37,8 @@ func (w *SensorReader) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("%s sensor worker stopped by context", w.name)
-			return ctx.Err()
-
-		case <-w.stopCh:
 			log.Printf("%s sensor worker stopped", w.name)
-			return nil
+			return ctx.Err()
 
 		case <-ticker.C:
 			if err := w.readAndEnqueue(); err != nil {
@@ -52,11 +46,6 @@ func (w *SensorReader) Start(ctx context.Context) error {
 			}
 		}
 	}
-}
-
-// Stop para o worker do sensor
-func (w *SensorReader) Stop() {
-	close(w.stopCh)
 }
 
 // readAndEnqueue lê uma medição do sensor e a envia para a fila
