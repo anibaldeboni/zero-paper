@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"sync"
 	"syscall"
 	"time"
 
@@ -114,8 +115,8 @@ func main() {
 	// Configuração da fila
 	config := queue.DefaultQueueConfig()
 	config.Workers = 2
-	config.BufferSize = 50
-	config.RetryPolicy.MaxRetries = 3
+	config.BufferSize = 120
+	config.RetryPolicy.MaxRetries = 10
 	config.RetryPolicy.BaseDelay = 5 * time.Second
 
 	// Configura graceful shutdown
@@ -127,8 +128,8 @@ func main() {
 
 	// Cria o worker do sensor
 	var (
-		sensorReader        *SensorReader
-		environmentalSensor bme280.Reader
+		sensorReader *SensorReader
+		bme280Sensor bme280.Reader
 	)
 
 	if useSimulated {
@@ -136,7 +137,7 @@ func main() {
 		simSensor := bme280.NewSimulatedSensor(nil)
 		sensorReader = NewSensorReader(simSensor, q, 10*time.Second, "Simulated")
 		// Usa o mesmo sensor simulado para o web server
-		environmentalSensor = simSensor
+		bme280Sensor = simSensor
 	} else {
 		log.Println("Attempting to use BME280 hardware sensor")
 		sensor, err := bme280.NewSensor(bme280.DefaultConfig())
@@ -145,55 +146,57 @@ func main() {
 		} else {
 			log.Println("BME280 sensor initialized successfully")
 			sensorReader = NewSensorReader(sensor, q, time.Minute, "BME280")
-			environmentalSensor = sensor
+			bme280Sensor = sensor
 			defer sensor.Close()
 		}
 	}
 
-	webServer := web.NewServer(environmentalSensor, nil, q)
+	webServer := web.NewServer(ctx, bme280Sensor, nil, q)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	// WaitGroup para aguardar todos os components terminarem
+	var wg sync.WaitGroup
+
 	// Inicia o sensor em uma goroutine
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		if err := sensorReader.Start(ctx); err != nil && err != context.Canceled {
 			log.Printf("Sensor worker error: %v", err)
 		}
 	}()
 
 	// Inicia o servidor web em uma goroutine
+	wg.Add(1)
 	go func() {
-		if err := webServer.Start(); err != nil {
+		defer wg.Done()
+		if err := webServer.Start(); err != nil && err != context.Canceled {
 			log.Printf("Web server error: %v", err)
 		}
 	}()
 
 	// Aguarda sinal de shutdown
 	<-sigChan
-	log.Println("Shutdown signal received...")
+	log.Println("Shutdown signal received")
 
-	// Para o sensor worker
-	sensorReader.Stop()
+	// Cancela o contexto principal (para sensor worker, queue e web server)
+	cancel()
 
-	// Para o servidor web graciosamente
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
+	// Aguarda todos os components terminarem graciosamente com timeout
+	log.Println("Waiting for components to shutdown...")
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
 
-	if err := webServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("Error shutting down web server: %v", err)
-	}
-
-	cancel() // cancela o context para parar todas as goroutines
-
-	// Aguarda um pouco para processar mensagens pendentes
-	log.Println("Waiting for pending messages...")
-	time.Sleep(5 * time.Second)
-
-	// Fecha a fila graciosamente
-	log.Println("Closing queue...")
-	if err := q.Close(); err != nil {
-		log.Printf("Error closing queue: %v", err)
+	select {
+	case <-done:
+		log.Println("All components shutdown successfully")
+	case <-time.After(10 * time.Second):
+		log.Println("Shutdown timeout reached, forcing exit")
 	}
 
 	log.Println("Shutdown completed")

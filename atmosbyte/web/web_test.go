@@ -45,7 +45,7 @@ func TestNewServer(t *testing.T) {
 	sensor := &MockSensorProvider{}
 	config := DefaultConfig()
 
-	server := NewServer(sensor, config, queueProvider)
+	server := NewServer(t.Context(), sensor, config, queueProvider)
 
 	if server == nil {
 		t.Fatal("Expected server to be created")
@@ -74,7 +74,7 @@ func TestDefaultConfig(t *testing.T) {
 
 func TestGetRoutes(t *testing.T) {
 	sensor := &MockSensorProvider{}
-	server := NewServer(sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, nil, queueProvider)
 
 	routes := server.GetRoutes()
 
@@ -99,7 +99,7 @@ func TestHandleMeasurements_Success(t *testing.T) {
 	}
 
 	sensor := &MockSensorProvider{measurement: measurement}
-	server := NewServer(sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/measurements", nil)
 	w := httptest.NewRecorder()
@@ -140,7 +140,7 @@ func TestHandleMeasurements_WorkingSensor(t *testing.T) {
 	}
 
 	sensor := &MockSensorProvider{measurement: measurement}
-	server := NewServer(sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/measurements", nil)
 	w := httptest.NewRecorder()
@@ -157,7 +157,7 @@ func TestHandleMeasurements_WorkingSensor(t *testing.T) {
 
 func TestHandleMeasurements_SensorError(t *testing.T) {
 	sensor := &MockSensorProvider{err: errors.New("sensor read error")}
-	server := NewServer(sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/measurements", nil)
 	w := httptest.NewRecorder()
@@ -180,7 +180,7 @@ func TestHandleMeasurements_SensorError(t *testing.T) {
 
 func TestHandleMeasurements_MethodNotAllowed(t *testing.T) {
 	sensor := &MockSensorProvider{}
-	server := NewServer(sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodPost, "/measurements", nil)
 	w := httptest.NewRecorder()
@@ -195,7 +195,7 @@ func TestHandleMeasurements_MethodNotAllowed(t *testing.T) {
 func TestHandleHealth(t *testing.T) {
 	measurement := bme280.Measurement{Temperature: 25.0, Humidity: 50.0, Pressure: 101325}
 	sensor := &MockSensorProvider{measurement: measurement}
-	server := NewServer(sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -222,7 +222,7 @@ func TestHandleHealth(t *testing.T) {
 
 func TestHandleHealth_WorkingSensor(t *testing.T) {
 	sensor := &MockSensorProvider{}
-	server := NewServer(sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -239,7 +239,7 @@ func TestHandleHealth_WorkingSensor(t *testing.T) {
 
 func TestHandleRoot_HTML(t *testing.T) {
 	sensor := &MockSensorProvider{}
-	server := NewServer(sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -265,28 +265,6 @@ func TestHandleRoot_HTML(t *testing.T) {
 	}
 }
 
-func TestShutdown(t *testing.T) {
-	sensor := &MockSensorProvider{}
-	server := NewServer(sensor, nil, queueProvider)
-
-	// Start server in background
-	go func() {
-		server.Start()
-	}()
-
-	// Give server time to start
-	time.Sleep(100 * time.Millisecond)
-
-	// Test shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	err := server.Shutdown(ctx)
-	if err != nil {
-		t.Errorf("Expected clean shutdown, got error: %v", err)
-	}
-}
-
 func BenchmarkHandleMeasurements(b *testing.B) {
 	measurement := bme280.Measurement{
 		Temperature: 25.5,
@@ -295,7 +273,7 @@ func BenchmarkHandleMeasurements(b *testing.B) {
 	}
 
 	sensor := &MockSensorProvider{measurement: measurement}
-	server := NewServer(sensor, nil, queueProvider)
+	server := NewServer(context.Background(), sensor, nil, queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/measurements", nil)
 
