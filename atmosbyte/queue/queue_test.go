@@ -134,8 +134,7 @@ func TestQueue_Basic(t *testing.T) {
 	config.Workers = 1
 	config.BufferSize = 10
 
-	q := queue.NewQueue(context.Background(), worker, config)
-	defer q.Close()
+	q := queue.NewQueue(t.Context(), worker, config)
 
 	// Testa enqueue básico
 	measurement := OrderData{
@@ -185,8 +184,7 @@ func TestQueue_Retry(t *testing.T) {
 	config.RetryPolicy.MaxRetries = 3
 	config.RetryPolicy.BaseDelay = 10 * time.Millisecond
 
-	q := queue.NewQueue(context.Background(), worker, config)
-	defer q.Close()
+	q := queue.NewQueue(t.Context(), worker, config)
 
 	measurement := OrderData{
 		ID:       "ORD123",
@@ -332,9 +330,78 @@ func TestShouldRetry_NewInterface(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := queue.ShouldRetry(tt.err)
+			// Testa comportamento normal (não shutdown)
+			ctx := context.Background()
+			result := queue.ShouldRetry(ctx, tt.err, 1, 3)
 			if result != tt.expected {
-				t.Errorf("ShouldRetry(%v) = %v, expected %v", tt.err, result, tt.expected)
+				t.Errorf("ShouldRetry(ctx, %v, 1, 3) = %v, expected %v", tt.err, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestShouldRetryDuringShutdown(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		attempts int
+		maxTries int
+		expected bool
+	}{
+		{
+			name:     "HTTP 500 during shutdown - first attempt should retry",
+			err:      NewHTTPError(500, "Internal Server Error"),
+			attempts: 1,
+			maxTries: 3,
+			expected: true,
+		},
+		{
+			name:     "HTTP 500 during shutdown - second attempt should not retry",
+			err:      NewHTTPError(500, "Internal Server Error"),
+			attempts: 2,
+			maxTries: 3,
+			expected: false,
+		},
+		{
+			name:     "HTTP 404 during shutdown should not retry",
+			err:      NewHTTPError(404, "Not Found"),
+			attempts: 1,
+			maxTries: 3,
+			expected: false,
+		},
+		{
+			name:     "Circuit breaker open during shutdown should not retry",
+			err:      queue.ErrCircuitBreakerOpen,
+			attempts: 1,
+			maxTries: 3,
+			expected: false,
+		},
+		{
+			name:     "Generic error during shutdown - first attempt should retry",
+			err:      errors.New("connection timeout"),
+			attempts: 1,
+			maxTries: 3,
+			expected: true,
+		},
+		{
+			name:     "Custom non-retryable error during shutdown should not retry",
+			err:      &CustomError{message: "permanent failure", retryable: false},
+			attempts: 1,
+			maxTries: 3,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Cria um contexto cancelado para simular shutdown
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel() // Cancela imediatamente para simular shutdown
+
+			result := queue.ShouldRetry(ctx, tt.err, tt.attempts, tt.maxTries)
+			if result != tt.expected {
+				t.Errorf("ShouldRetry(canceledCtx, %v, %d, %d) = %v, expected %v",
+					tt.err, tt.attempts, tt.maxTries, result, tt.expected)
 			}
 		})
 	}
@@ -352,9 +419,7 @@ func TestGenericQueue_CustomType_Main(t *testing.T) {
 	config.RetryPolicy.MaxRetries = 2
 	config.RetryPolicy.BaseDelay = 10 * time.Millisecond
 
-	// Cria uma fila genérica para OrderData
-	q := queue.NewQueue(context.Background(), worker, config)
-	defer q.Close()
+	q := queue.NewQueue(t.Context(), worker, config)
 
 	// Testa com pedido normal (sucesso)
 	order1 := OrderData{
@@ -422,9 +487,7 @@ func TestGenericQueue_WorkerFunc_QueueTest(t *testing.T) {
 	config.Workers = 1
 	config.BufferSize = 10
 
-	// Cria uma fila genérica para strings
-	q := queue.NewQueue(context.Background(), workerFunc, config)
-	defer q.Close()
+	q := queue.NewQueue(t.Context(), workerFunc, config)
 
 	// Envia algumas mensagens
 	messages := []string{"Hello", "World", "from", "Generic", "Queue"}
@@ -493,8 +556,7 @@ func TestGenericQueue_RetryBehavior_Local(t *testing.T) {
 	config.RetryPolicy.MaxRetries = 3
 	config.RetryPolicy.BaseDelay = 10 * time.Millisecond
 
-	q := queue.NewQueue(context.Background(), worker, config)
-	defer q.Close()
+	q := queue.NewQueue(t.Context(), worker, config)
 
 	order := OrderData{
 		ID:       "ORD_RETRY",
@@ -543,8 +605,7 @@ func TestGenericQueue_EventData_Complete(t *testing.T) {
 	config.Workers = 2
 	config.BufferSize = 10
 
-	q := queue.NewQueue(context.Background(), eventWorker, config)
-	defer q.Close()
+	q := queue.NewQueue(t.Context(), eventWorker, config)
 
 	// Envia alguns eventos
 	events := []EventData{
@@ -599,4 +660,407 @@ func TestGenericQueue_EventData_Complete(t *testing.T) {
 			t.Errorf("Expected event type %s not found in processed events", expectedType)
 		}
 	}
+}
+
+// ==============================
+// Testes de Graceful Shutdown
+// ==============================
+
+// TrackingWorker rastreia mensagens processadas e permite controle de timing
+type TrackingWorker struct {
+	processedMessages []string
+	processingTimes   []time.Duration
+	blockDuration     time.Duration
+	shouldBlock       bool
+	mu                sync.Mutex
+	processStarted    chan struct{}
+	allowCompletion   chan struct{}
+}
+
+func NewTrackingWorker(blockDuration time.Duration) *TrackingWorker {
+	return &TrackingWorker{
+		blockDuration:   blockDuration,
+		processStarted:  make(chan struct{}, 10),
+		allowCompletion: make(chan struct{}, 10),
+	}
+}
+
+func (w *TrackingWorker) Process(ctx context.Context, msg queue.Message[string]) error {
+	start := time.Now()
+
+	w.mu.Lock()
+	messageID := msg.Data
+	w.mu.Unlock()
+
+	// Sinaliza que o processamento começou
+	w.processStarted <- struct{}{}
+
+	// Se deve bloquear, aguarda sinal para continuar
+	if w.shouldBlock {
+		select {
+		case <-w.allowCompletion:
+			// Permitido continuar
+		case <-ctx.Done():
+			// Contexto cancelado durante processamento
+			w.mu.Lock()
+			w.processedMessages = append(w.processedMessages, messageID+"_CANCELLED")
+			w.processingTimes = append(w.processingTimes, time.Since(start))
+			w.mu.Unlock()
+			return ctx.Err()
+		}
+	} else if w.blockDuration > 0 {
+		// Simula processamento longo
+		select {
+		case <-time.After(w.blockDuration):
+			// Processamento normal
+		case <-ctx.Done():
+			// Contexto cancelado durante processamento
+			w.mu.Lock()
+			w.processedMessages = append(w.processedMessages, messageID+"_CANCELLED")
+			w.processingTimes = append(w.processingTimes, time.Since(start))
+			w.mu.Unlock()
+			return ctx.Err()
+		}
+	}
+
+	w.mu.Lock()
+	w.processedMessages = append(w.processedMessages, messageID)
+	w.processingTimes = append(w.processingTimes, time.Since(start))
+	w.mu.Unlock()
+
+	return nil
+}
+
+func (w *TrackingWorker) GetProcessedMessages() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	result := make([]string, len(w.processedMessages))
+	copy(result, w.processedMessages)
+	return result
+}
+
+func (w *TrackingWorker) GetProcessingTimes() []time.Duration {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	result := make([]time.Duration, len(w.processingTimes))
+	copy(result, w.processingTimes)
+	return result
+}
+
+func (w *TrackingWorker) SetBlocking(shouldBlock bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.shouldBlock = shouldBlock
+}
+
+func (w *TrackingWorker) AllowCompletion() {
+	w.allowCompletion <- struct{}{}
+}
+
+func (w *TrackingWorker) WaitForProcessingStart() {
+	<-w.processStarted
+}
+
+func TestGracefulShutdown_Basic(t *testing.T) {
+	worker := NewTrackingWorker(50 * time.Millisecond)
+
+	config := queue.DefaultQueueConfig()
+	config.Workers = 2
+	config.BufferSize = 10
+
+	ctx, cancel := context.WithCancel(context.Background())
+	q := queue.NewQueue(ctx, worker, config)
+
+	// Envia algumas mensagens
+	messages := []string{"msg1", "msg2", "msg3"}
+	for _, msg := range messages {
+		err := q.Enqueue(msg)
+		if err != nil {
+			t.Fatalf("Failed to enqueue message: %v", err)
+		}
+	}
+
+	// Aguarda um pouco para processamento começar
+	time.Sleep(20 * time.Millisecond)
+
+	// Cancela o contexto (inicia shutdown)
+	cancel()
+
+	// Aguarda um tempo razoável para shutdown
+	time.Sleep(200 * time.Millisecond)
+
+	processedMessages := worker.GetProcessedMessages()
+
+	// Verifica se pelo menos algumas mensagens foram processadas
+	if len(processedMessages) == 0 {
+		t.Error("Expected at least some messages to be processed during shutdown")
+	}
+
+	t.Logf("Processed messages during shutdown: %v", processedMessages)
+}
+
+func TestGracefulShutdown_ProcessingInProgress(t *testing.T) {
+	worker := NewTrackingWorker(0) // Sem delay automático
+	worker.SetBlocking(true)       // Controle manual do bloqueio
+
+	config := queue.DefaultQueueConfig()
+	config.Workers = 1
+	config.BufferSize = 10
+
+	ctx, cancel := context.WithCancel(context.Background())
+	q := queue.NewQueue(ctx, worker, config)
+
+	// Envia uma mensagem que será processada
+	err := q.Enqueue("blocking_message")
+	if err != nil {
+		t.Fatalf("Failed to enqueue message: %v", err)
+	}
+
+	// Aguarda o processamento começar
+	worker.WaitForProcessingStart()
+
+	// Cancela o contexto enquanto mensagem está sendo processada
+	cancel()
+
+	// Aguarda um pouco para o shutdown começar
+	time.Sleep(50 * time.Millisecond)
+
+	// Permite que a mensagem complete o processamento
+	worker.AllowCompletion()
+
+	// Aguarda mais tempo para o shutdown completar
+	time.Sleep(100 * time.Millisecond)
+
+	processedMessages := worker.GetProcessedMessages()
+
+	// A mensagem deve ter sido processada ou cancelada
+	if len(processedMessages) != 1 {
+		t.Errorf("Expected exactly 1 processed message, got %d: %v", len(processedMessages), processedMessages)
+	}
+
+	// Verifica se a mensagem foi processada (não cancelada)
+	if len(processedMessages) > 0 && processedMessages[0] != "blocking_message" {
+		t.Logf("Message was cancelled during shutdown: %s", processedMessages[0])
+	} else {
+		t.Logf("Message completed successfully during shutdown: %s", processedMessages[0])
+	}
+}
+
+func TestGracefulShutdown_NoNewMessages(t *testing.T) {
+	worker := NewTrackingWorker(10 * time.Millisecond)
+
+	config := queue.DefaultQueueConfig()
+	config.Workers = 1
+	config.BufferSize = 10
+
+	ctx, cancel := context.WithCancel(context.Background())
+	q := queue.NewQueue(ctx, worker, config)
+
+	// Envia algumas mensagens iniciais
+	for i := 0; i < 3; i++ {
+		err := q.Enqueue(fmt.Sprintf("initial_msg_%d", i))
+		if err != nil {
+			t.Fatalf("Failed to enqueue initial message: %v", err)
+		}
+	}
+
+	// Aguarda processamento começar
+	time.Sleep(20 * time.Millisecond)
+
+	// Cancela o contexto
+	cancel()
+
+	// Aguarda um pouco para o shutdown processar mensagens pendentes
+	time.Sleep(50 * time.Millisecond)
+
+	// Tenta enviar nova mensagem após shutdown - deve falhar
+	err := q.Enqueue("should_fail")
+	if err == nil {
+		t.Error("Expected error when enqueueing after shutdown, but got nil")
+	}
+
+	if err != queue.ErrQueueClosed {
+		t.Errorf("Expected ErrQueueClosed, got %v", err)
+	}
+
+	// Aguarda mais tempo para shutdown completar
+	time.Sleep(100 * time.Millisecond)
+
+	processedMessages := worker.GetProcessedMessages()
+	t.Logf("Messages processed before shutdown rejection: %v", processedMessages)
+
+	// Verifica se não há mensagem "should_fail" processada
+	for _, msg := range processedMessages {
+		if msg == "should_fail" {
+			t.Error("Message sent after shutdown was incorrectly processed")
+		}
+	}
+}
+
+func TestGracefulShutdown_RetryBehavior(t *testing.T) {
+	retryCount := 0
+	worker := &MockWorker{
+		processFunc: func(ctx context.Context, msg OrderData) error {
+			retryCount++
+
+			// Verifica se estamos em shutdown
+			if ctx.Err() != nil {
+				t.Logf("Processing message %s during shutdown (attempt %d)", msg.ID, retryCount)
+
+				// Durante shutdown, falha apenas uma vez para testar retry limitado
+				if retryCount == 1 {
+					return NewHTTPError(500, "Temporary error during shutdown")
+				}
+				return nil
+			}
+
+			// Comportamento normal
+			if retryCount < 2 {
+				return NewHTTPError(500, "Temporary error")
+			}
+			return nil
+		},
+	}
+
+	config := queue.DefaultQueueConfig()
+	config.Workers = 1
+	config.BufferSize = 10
+	config.RetryPolicy.MaxRetries = 3
+	config.RetryPolicy.BaseDelay = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	q := queue.NewQueue(ctx, worker, config)
+
+	// Envia mensagem que falhará e precisará de retry
+	measurement := OrderData{
+		ID:       "shutdown_retry_test",
+		Amount:   100.0,
+		Customer: "Test Customer",
+	}
+
+	err := q.Enqueue(measurement)
+	if err != nil {
+		t.Fatalf("Failed to enqueue message: %v", err)
+	}
+
+	// Aguarda primeira tentativa falhar
+	time.Sleep(30 * time.Millisecond)
+
+	// Cancela contexto durante retry
+	cancel()
+
+	// Aguarda processamento durante shutdown
+	time.Sleep(200 * time.Millisecond)
+
+	// Verifica quantas tentativas foram feitas
+	t.Logf("Total retry attempts during shutdown: %d", retryCount)
+
+	// Durante shutdown, deve ter limitado os retries
+	if retryCount > 2 {
+		t.Errorf("Expected at most 2 attempts during shutdown, got %d", retryCount)
+	}
+
+	if len(worker.calls) == 0 {
+		t.Error("Expected at least one call to worker")
+	}
+}
+
+func TestGracefulShutdown_MultipleWorkers(t *testing.T) {
+	worker := NewTrackingWorker(30 * time.Millisecond)
+
+	config := queue.DefaultQueueConfig()
+	config.Workers = 3
+	config.BufferSize = 20
+
+	ctx, cancel := context.WithCancel(context.Background())
+	q := queue.NewQueue(ctx, worker, config)
+
+	// Envia muitas mensagens para multiple workers
+	numMessages := 10
+	for i := 0; i < numMessages; i++ {
+		err := q.Enqueue(fmt.Sprintf("multi_worker_msg_%d", i))
+		if err != nil {
+			t.Fatalf("Failed to enqueue message %d: %v", i, err)
+		}
+	}
+
+	// Aguarda processamento começar
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancela contexto
+	cancel()
+
+	// Aguarda shutdown
+	time.Sleep(200 * time.Millisecond)
+
+	processedMessages := worker.GetProcessedMessages()
+	processingTimes := worker.GetProcessingTimes()
+
+	t.Logf("Processed %d out of %d messages", len(processedMessages), numMessages)
+	t.Logf("Processing times: %v", processingTimes)
+
+	// Deve ter processado pelo menos algumas mensagens
+	if len(processedMessages) == 0 {
+		t.Error("Expected some messages to be processed by multiple workers")
+	}
+
+	// Verifica se não há duplicates (cada mensagem processada apenas uma vez)
+	messageSet := make(map[string]bool)
+	for _, msg := range processedMessages {
+		if messageSet[msg] {
+			t.Errorf("Duplicate message processed: %s", msg)
+		}
+		messageSet[msg] = true
+	}
+}
+
+func TestGracefulShutdown_QueueStats(t *testing.T) {
+	worker := NewTrackingWorker(100 * time.Millisecond) // Processamento lento
+
+	config := queue.DefaultQueueConfig()
+	config.Workers = 1
+	config.BufferSize = 10
+
+	ctx, cancel := context.WithCancel(context.Background())
+	q := queue.NewQueue(ctx, worker, config)
+
+	// Envia várias mensagens
+	for i := 0; i < 5; i++ {
+		err := q.Enqueue(fmt.Sprintf("stats_msg_%d", i))
+		if err != nil {
+			t.Fatalf("Failed to enqueue message: %v", err)
+		}
+	}
+
+	// Verifica stats antes do shutdown
+	statsBefore := q.Stats()
+	t.Logf("Stats before shutdown - Queue: %d, Retry: %d, Workers: %d, CB: %v",
+		statsBefore.QueueSize, statsBefore.RetryQueueSize, statsBefore.Workers, statsBefore.CircuitBreakerState)
+
+	// Aguarda um pouco
+	time.Sleep(50 * time.Millisecond)
+
+	// Verifica stats durante processamento
+	statsDuring := q.Stats()
+	t.Logf("Stats during processing - Queue: %d, Retry: %d, Workers: %d, CB: %v",
+		statsDuring.QueueSize, statsDuring.RetryQueueSize, statsDuring.Workers, statsDuring.CircuitBreakerState)
+
+	// Cancela contexto
+	cancel()
+
+	// Aguarda shutdown
+	time.Sleep(300 * time.Millisecond)
+
+	// Verifica stats após shutdown
+	statsAfter := q.Stats()
+	t.Logf("Stats after shutdown - Queue: %d, Retry: %d, Workers: %d, CB: %v",
+		statsAfter.QueueSize, statsAfter.RetryQueueSize, statsAfter.Workers, statsAfter.CircuitBreakerState)
+
+	// Stats devem refletir o estado após shutdown
+	if statsAfter.Workers != config.Workers {
+		t.Errorf("Worker count should remain %d, got %d", config.Workers, statsAfter.Workers)
+	}
+
+	processedMessages := worker.GetProcessedMessages()
+	t.Logf("Final processed messages: %v", processedMessages)
 }

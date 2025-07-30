@@ -3,228 +3,84 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
-	"strconv"
 	"sync"
 	"time"
 )
 
-// Erros customizados
-var (
-	ErrQueueClosed        = errors.New("queue is closed")
-	ErrCircuitBreakerOpen = errors.New("circuit breaker is open")
-	ErrMaxRetriesExceeded = errors.New("maximum retries exceeded")
-)
-
-// RetryableError define a interface para erros que podem ser retentados
-type RetryableError interface {
-	error
-	IsRetryable() bool
+// ProcessingContext encapsula o contexto de processamento
+type ProcessingContext[T any] struct {
+	Queue      *Queue[T]
+	Message    Message[T]
+	WorkerID   int
+	IsShutdown bool
 }
 
-// SimpleRetryableError implementação simples de RetryableError
-type SimpleRetryableError struct {
-	err       error
-	retryable bool
-}
+// NewProcessingContext cria um novo contexto de processamento
+func NewProcessingContext[T any](q *Queue[T], msg Message[T], workerID int) *ProcessingContext[T] {
+	isShutdown := q.ctx.Err() != nil
 
-func (e *SimpleRetryableError) Error() string {
-	return e.err.Error()
-}
-
-func (e *SimpleRetryableError) IsRetryable() bool {
-	return e.retryable
-}
-
-// NewRetryableError cria um novo erro retentável
-func NewRetryableError(err error, retryable bool) *SimpleRetryableError {
-	return &SimpleRetryableError{
-		err:       err,
-		retryable: retryable,
+	return &ProcessingContext[T]{
+		Queue:      q,
+		Message:    msg,
+		WorkerID:   workerID,
+		IsShutdown: isShutdown,
 	}
 }
 
-// Message representa uma mensagem na fila com metadados de controle
-type Message[T any] struct {
-	ID        string    `json:"id"`
-	Data      T         `json:"data"`
-	Attempts  int       `json:"attempts"`
-	MaxTries  int       `json:"max_tries"`
-	CreatedAt time.Time `json:"created_at"`
-	LastTry   time.Time `json:"last_try"`
+// GetProcessingContext cria contexto de execução com timeout adequado
+func (pc *ProcessingContext[T]) GetProcessingContext() (context.Context, context.CancelFunc) {
+	if pc.IsShutdown {
+		return context.WithTimeout(context.Background(), 5*time.Second)
+	}
+	return pc.Queue.ctx, func() {}
 }
 
-// Worker define a interface para processamento de mensagens
-type Worker[T any] interface {
-	Process(ctx context.Context, msg Message[T]) error
+// ShouldRetry verifica se deve retentar usando a lógica centralizada
+func (pc *ProcessingContext[T]) ShouldRetry(err error) bool {
+	return pc.Message.Attempts < pc.Message.MaxTries &&
+		ShouldRetry(pc.Queue.ctx, err, pc.Message.Attempts, pc.Message.MaxTries) &&
+		err != ErrCircuitBreakerOpen
 }
 
-// WorkerFunc é um adapter que permite usar funções como Worker
-type WorkerFunc[T any] func(ctx context.Context, msg Message[T]) error
-
-func (f WorkerFunc[T]) Process(ctx context.Context, msg Message[T]) error {
-	return f(ctx, msg)
+// LogError registra erro com prefixo adequado
+func (pc *ProcessingContext[T]) LogError(err error) {
+	prefix := pc.getLogPrefix()
+	log.Printf("%sWorker %d: Error processing message %s (attempt %d/%d): %v",
+		prefix, pc.WorkerID, pc.Message.ID,
+		pc.Message.Attempts, pc.Message.MaxTries, err)
 }
 
-// RetryPolicy define a política de retry
-type RetryPolicy struct {
-	MaxRetries int
-	BaseDelay  time.Duration
-	MaxDelay   time.Duration
+// LogSuccess registra sucesso com prefixo adequado
+func (pc *ProcessingContext[T]) LogSuccess() {
+	prefix := pc.getLogPrefix()
+	log.Printf("%sWorker %d: Successfully processed message %s",
+		prefix, pc.WorkerID, pc.Message.ID)
 }
 
-// DefaultRetryPolicy retorna uma política de retry padrão
-func DefaultRetryPolicy() RetryPolicy {
-	return RetryPolicy{
-		MaxRetries: 3,
-		BaseDelay:  1 * time.Second,
-		MaxDelay:   30 * time.Second,
+// LogRetryAction registra ação de retry
+func (pc *ProcessingContext[T]) LogRetryAction() {
+	if pc.IsShutdown {
+		prefix := pc.getLogPrefix()
+		log.Printf("%sWorker %d: Queueing message %s for immediate retry (shutdown mode)",
+			prefix, pc.WorkerID, pc.Message.ID)
 	}
 }
 
-// CalculateDelay calcula o delay para a próxima tentativa usando backoff exponential
-func (rp RetryPolicy) CalculateDelay(attempt int) time.Duration {
-	return min(rp.BaseDelay*time.Duration(1<<uint(attempt)), rp.MaxDelay)
+// LogDrop registra quando mensagem é descartada
+func (pc *ProcessingContext[T]) LogDrop(reason string) {
+	prefix := pc.getLogPrefix()
+	log.Printf("%sWorker %d: %s",
+		prefix, pc.WorkerID, reason)
 }
 
-// ShouldRetry determina se um erro deve ser retentado usando a nova interface
-func ShouldRetry(err error) bool {
-	// Verifica se o erro implementa RetryableError
-	if retryableErr, ok := err.(RetryableError); ok {
-		return retryableErr.IsRetryable()
+// getLogPrefix retorna o prefixo adequado para logs
+func (pc *ProcessingContext[T]) getLogPrefix() string {
+	if pc.IsShutdown {
+		return "[SHUTDOWN] "
 	}
-
-	// Fallback: outros tipos de erro são considerados retentáveis por padrão
-	// Como timeout, connection refused, etc.
-	return true
-}
-
-// CircuitBreakerState representa o estado do circuit breaker
-type CircuitBreakerState int
-
-const (
-	CircuitBreakerClosed CircuitBreakerState = iota
-	CircuitBreakerOpen
-	CircuitBreakerHalfOpen
-)
-
-// CircuitBreaker implementa o padrão Circuit Breaker
-type CircuitBreaker struct {
-	mu                sync.RWMutex
-	state             CircuitBreakerState
-	failureCount      int
-	lastFailureTime   time.Time
-	successCount      int
-	failureThreshold  int
-	timeout           time.Duration
-	halfOpenSuccesses int
-	maxHalfOpenTries  int
-}
-
-// NewCircuitBreaker cria um novo circuit breaker
-func NewCircuitBreaker(failureThreshold int, timeout time.Duration) *CircuitBreaker {
-	return &CircuitBreaker{
-		state:            CircuitBreakerClosed,
-		failureThreshold: failureThreshold,
-		timeout:          timeout,
-		maxHalfOpenTries: 3,
-	}
-}
-
-// Call executa uma função através do circuit breaker
-func (cb *CircuitBreaker) Call(fn func() error) error {
-	if !cb.allowCall() {
-		return ErrCircuitBreakerOpen
-	}
-
-	err := fn()
-	cb.recordResult(err)
-	return err
-}
-
-// allowCall verifica se a chamada é permitida
-func (cb *CircuitBreaker) allowCall() bool {
-	cb.mu.RLock()
-	defer cb.mu.RUnlock()
-
-	switch cb.state {
-	case CircuitBreakerClosed:
-		return true
-	case CircuitBreakerOpen:
-		if time.Since(cb.lastFailureTime) >= cb.timeout {
-			cb.mu.RUnlock()
-			cb.mu.Lock()
-			cb.state = CircuitBreakerHalfOpen
-			cb.halfOpenSuccesses = 0
-			cb.mu.Unlock()
-			cb.mu.RLock()
-			return true
-		}
-		return false
-	case CircuitBreakerHalfOpen:
-		return cb.halfOpenSuccesses < cb.maxHalfOpenTries
-	default:
-		return false
-	}
-}
-
-// recordResult registra o resultado da chamada
-func (cb *CircuitBreaker) recordResult(err error) {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
-	if err != nil {
-		cb.failureCount++
-		cb.lastFailureTime = time.Now()
-
-		if cb.state == CircuitBreakerHalfOpen {
-			cb.state = CircuitBreakerOpen
-		} else if cb.failureCount >= cb.failureThreshold {
-			cb.state = CircuitBreakerOpen
-		}
-	} else {
-		cb.failureCount = 0
-		if cb.state == CircuitBreakerHalfOpen {
-			cb.halfOpenSuccesses++
-			if cb.halfOpenSuccesses >= cb.maxHalfOpenTries {
-				cb.state = CircuitBreakerClosed
-			}
-		}
-	}
-}
-
-// State retorna o estado atual do circuit breaker
-func (cb *CircuitBreaker) State() CircuitBreakerState {
-	cb.mu.RLock()
-	defer cb.mu.RUnlock()
-	return cb.state
-}
-
-// QueueConfig define a configuração da fila
-type QueueConfig struct {
-	Workers              int
-	BufferSize           int
-	RetryPolicy          RetryPolicy
-	CircuitBreakerConfig CircuitBreakerConfig
-}
-
-// CircuitBreakerConfig define a configuração do circuit breaker
-type CircuitBreakerConfig struct {
-	FailureThreshold int
-	Timeout          time.Duration
-}
-
-// DefaultQueueConfig retorna uma configuração padrão para a fila
-func DefaultQueueConfig() QueueConfig {
-	return QueueConfig{
-		Workers:     3,
-		BufferSize:  100,
-		RetryPolicy: DefaultRetryPolicy(),
-		CircuitBreakerConfig: CircuitBreakerConfig{
-			FailureThreshold: 5,
-			Timeout:          30 * time.Second,
-		},
-	}
+	return ""
 }
 
 // Queue representa uma fila de processamento de mensagens
@@ -237,8 +93,6 @@ type Queue[T any] struct {
 	wg             sync.WaitGroup
 	ctx            context.Context
 	cancel         context.CancelFunc
-	closed         bool
-	mu             sync.RWMutex
 }
 
 // NewQueue cria uma nova instância da fila
@@ -268,17 +122,21 @@ func NewQueue[T any](ctx context.Context, worker Worker[T], config QueueConfig) 
 	q.wg.Add(1)
 	go q.retryLoop()
 
+	// Inicia o monitor de graceful shutdown
+	q.wg.Add(1)
+	go q.gracefulShutdownMonitor()
+
 	return q
 }
 
 // Enqueue adiciona uma nova mensagem à fila
 func (q *Queue[T]) Enqueue(data T) error {
-	q.mu.RLock()
-	if q.closed {
-		q.mu.RUnlock()
+	// Verifica se o contexto foi cancelado
+	select {
+	case <-q.ctx.Done():
 		return ErrQueueClosed
+	default:
 	}
-	q.mu.RUnlock()
 
 	msg := Message[T]{
 		ID:        generateID(),
@@ -292,6 +150,7 @@ func (q *Queue[T]) Enqueue(data T) error {
 	case q.messages <- msg:
 		return nil
 	case <-q.ctx.Done():
+		log.Println("Queue context cancelled, cannot enqueue message")
 		return ErrQueueClosed
 	default:
 		// Fila cheia, pode optar por bloquear ou retornar erro
@@ -299,21 +158,34 @@ func (q *Queue[T]) Enqueue(data T) error {
 	}
 }
 
-// Close fecha a fila e aguarda o processamento das mensagens pendentes
-func (q *Queue[T]) Close() error {
-	q.mu.Lock()
-	if q.closed {
-		q.mu.Unlock()
-		return nil
-	}
-	q.closed = true
-	q.mu.Unlock()
+// gracefulShutdownMonitor monitora o contexto pai e executa shutdown gracioso
+func (q *Queue[T]) gracefulShutdownMonitor() {
+	defer q.wg.Done()
 
+	// Aguarda o contexto pai ser cancelado
+	<-q.ctx.Done()
+
+	log.Println("Queue: Starting graceful shutdown...")
+
+	// Para de aceitar novas mensagens fechando o canal de entrada
 	close(q.messages)
+
+	// Aguarda um timeout para que workers processem mensagens pendentes
+	shutdownTimeout := 30 * time.Second
+	shutdownTimer := time.NewTimer(shutdownTimeout)
+	defer shutdownTimer.Stop()
+
+	select {
+	case <-shutdownTimer.C:
+		log.Println("Queue: Shutdown timeout reached, forcing closure")
+	case <-time.After(1 * time.Second):
+		// Pequeno delay para permitir que workers processem mensagens restantes
+	}
+
+	// Fecha o canal de retry após delay
 	close(q.retryQueue)
-	q.cancel()
-	q.wg.Wait()
-	return nil
+
+	log.Println("Queue: Graceful shutdown completed")
 }
 
 // workerLoop é o loop principal de processamento de cada worker
@@ -324,11 +196,27 @@ func (q *Queue[T]) workerLoop(workerID int) {
 		select {
 		case msg, ok := <-q.messages:
 			if !ok {
+				// Canal fechado, processo de shutdown iniciado
+				log.Printf("Worker %d: Messages channel closed, shutting down", workerID)
 				return
 			}
 			q.processMessage(msg, workerID)
 		case <-q.ctx.Done():
-			return
+			// Contexto cancelado - drena mensagens restantes até canal fechar
+			for {
+				select {
+				case msg, ok := <-q.messages:
+					if !ok {
+						log.Printf("Worker %d: Messages channel closed, shutting down", workerID)
+						return
+					}
+					q.processMessage(msg, workerID)
+				default:
+					// Não há mais mensagens, pode sair
+					log.Printf("Worker %d: Context cancelled, no more messages to process", workerID)
+					return
+				}
+			}
 		}
 	}
 }
@@ -341,80 +229,183 @@ func (q *Queue[T]) retryLoop() {
 		select {
 		case msg, ok := <-q.retryQueue:
 			if !ok {
+				log.Println("RetryLoop: Retry channel closed, shutting down")
 				return
 			}
+			q.handleRetryMessage(msg)
 
-			// Calcula o delay baseado no número de tentativas
-			delay := q.config.RetryPolicy.CalculateDelay(msg.Attempts)
-
-			// Aguarda o delay antes de reprocessar
-			time.Sleep(delay)
-
-			// Recoloca na fila principal
-			select {
-			case q.messages <- msg:
-			case <-q.ctx.Done():
-				return
-			}
 		case <-q.ctx.Done():
+			q.handleShutdownRetries()
 			return
 		}
 	}
 }
 
-// processMessage processa uma mensagem individual
+// handleRetryMessage processa uma mensagem de retry usando strategy pattern
+func (q *Queue[T]) handleRetryMessage(msg Message[T]) {
+	isShutdown := q.ctx.Err() != nil
+
+	if isShutdown {
+		q.handleShutdownRetry(msg)
+	} else {
+		q.handleNormalRetry(msg)
+	}
+}
+
+// handleNormalRetry processa retry com delay normal
+func (q *Queue[T]) handleNormalRetry(msg Message[T]) {
+	delay := q.config.RetryPolicy.CalculateDelay(msg.Attempts)
+	log.Printf("RetryLoop: Waiting %v before retrying message %s", delay, msg.ID)
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		q.sendToMainQueue(msg, "RetryLoop: Messages queue full, dropping message")
+	case <-q.ctx.Done():
+		q.sendToMainQueue(msg, "RetryLoop: Dropping message due to shutdown during delay")
+	}
+}
+
+// handleShutdownRetry processa retry imediato durante shutdown
+func (q *Queue[T]) handleShutdownRetry(msg Message[T]) {
+	log.Printf("RetryLoop: Processing retry message %s immediately (shutdown mode)", msg.ID)
+
+	select {
+	case q.messages <- msg:
+		// Mensagem enviada para processamento
+	default:
+		log.Printf("RetryLoop: Dropping message %s due to shutdown", msg.ID)
+	}
+}
+
+// sendToMainQueue tenta enviar mensagem para fila principal
+func (q *Queue[T]) sendToMainQueue(msg Message[T], failureMsg string) {
+	defer func() {
+		if r := recover(); r != nil {
+			// Canal foi fechado, descarta mensagem silenciosamente
+			log.Printf("RetryLoop: Dropping message %s due to closed channel", msg.ID)
+		}
+	}()
+
+	select {
+	case q.messages <- msg:
+		// Mensagem enviada com sucesso
+	case <-q.ctx.Done():
+		log.Printf("RetryLoop: Dropping message %s due to shutdown", msg.ID)
+	default:
+		log.Printf(failureMsg+" %s", msg.ID)
+	}
+}
+
+// handleShutdownRetries processa mensagens restantes durante shutdown
+func (q *Queue[T]) handleShutdownRetries() {
+	defer func() {
+		if r := recover(); r != nil {
+			// Canal foi fechado durante shutdown, isso é esperado
+			log.Println("RetryLoop: Messages channel closed during shutdown cleanup")
+		}
+	}()
+
+	for {
+		select {
+		case msg, ok := <-q.retryQueue:
+			if !ok {
+				return
+			}
+			// Durante shutdown, processa imediatamente
+			// Verifica se o canal ainda está aberto antes de tentar enviar
+			select {
+			case q.messages <- msg:
+				log.Printf("RetryLoop: Sent message %s for immediate processing due to shutdown", msg.ID)
+			case <-q.ctx.Done():
+				log.Printf("RetryLoop: Dropping message %s due to shutdown", msg.ID)
+			default:
+				log.Printf("RetryLoop: Dropping message %s due to shutdown", msg.ID)
+			}
+		default:
+			log.Println("RetryLoop: Context cancelled, shutting down")
+			return
+		}
+	}
+}
+
+// processMessage processa uma mensagem individual usando strategy pattern
 func (q *Queue[T]) processMessage(msg Message[T], workerID int) {
 	msg.Attempts++
 	msg.LastTry = time.Now()
 
-	// Processa através do circuit breaker
+	// Cria contexto de processamento
+	pc := NewProcessingContext(q, msg, workerID)
+
+	// Executa processamento
+	result := q.executeProcessing(pc)
+
+	// Trata resultado baseado no sucesso/falha
+	q.handleProcessingResult(pc, result)
+}
+
+// ProcessingResult encapsula o resultado do processamento
+type ProcessingResult struct {
+	Error   error
+	Success bool
+}
+
+// executeProcessing executa o processamento da mensagem
+func (q *Queue[T]) executeProcessing(pc *ProcessingContext[T]) ProcessingResult {
+	ctx, cancel := pc.GetProcessingContext()
+	defer cancel()
+
 	err := q.circuitBreaker.Call(func() error {
-		return q.worker.Process(q.ctx, msg)
+		return q.worker.Process(ctx, pc.Message)
 	})
 
-	if err != nil {
-		log.Printf("Worker %d: Error processing message %s (attempt %d/%d): %v",
-			workerID, msg.ID, msg.Attempts, msg.MaxTries, err)
-
-		// Verifica se deve retentativa
-		if msg.Attempts < msg.MaxTries && ShouldRetry(err) && err != ErrCircuitBreakerOpen {
-			select {
-			case q.retryQueue <- msg:
-			case <-q.ctx.Done():
-				return
-			default:
-				log.Printf("Worker %d: Retry queue full, dropping message %s", workerID, msg.ID)
-			}
-		} else {
-			log.Printf("Worker %d: Dropping message %s after %d attempts", workerID, msg.ID, msg.Attempts)
-		}
-	} else {
-		log.Printf("Worker %d: Successfully processed message %s", workerID, msg.ID)
+	return ProcessingResult{
+		Error:   err,
+		Success: err == nil,
 	}
 }
 
-// generateID gera um ID único para a mensagem
-func generateID() string {
-	return strconv.FormatInt(time.Now().UnixNano(), 10)
+// handleProcessingResult trata o resultado do processamento
+func (q *Queue[T]) handleProcessingResult(pc *ProcessingContext[T], result ProcessingResult) {
+	if result.Success {
+		pc.LogSuccess()
+		return
+	}
+
+	// Processamento falhou
+	pc.LogError(result.Error)
+
+	// Verifica se deve retentar
+	if pc.ShouldRetry(result.Error) {
+		q.handleRetryAttempt(pc)
+	} else {
+		pc.LogDrop(fmt.Sprintf("Dropping message %s after %d attempts",
+			pc.Message.ID, pc.Message.Attempts))
+	}
+}
+
+// handleRetryAttempt tenta recolocar mensagem na fila de retry
+func (q *Queue[T]) handleRetryAttempt(pc *ProcessingContext[T]) {
+	pc.LogRetryAction()
+
+	select {
+	case q.retryQueue <- pc.Message:
+		// Mensagem enviada para retry
+	case <-q.ctx.Done():
+		pc.LogDrop("Retry queue unavailable, dropping message")
+	default:
+		pc.LogDrop("Retry queue full, dropping message")
+	}
 }
 
 // Stats retorna estatísticas da fila
 func (q *Queue[T]) Stats() QueueStats {
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-
 	return QueueStats{
 		QueueSize:           len(q.messages),
 		RetryQueueSize:      len(q.retryQueue),
 		CircuitBreakerState: q.circuitBreaker.State(),
 		Workers:             q.config.Workers,
 	}
-}
-
-// QueueStats representa estatísticas da fila
-type QueueStats struct {
-	QueueSize           int
-	RetryQueueSize      int
-	CircuitBreakerState CircuitBreakerState
-	Workers             int
 }
