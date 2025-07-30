@@ -123,7 +123,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Cria a fila para processar measurements (agora com contexto)
+	// Cria a fila para processar measurements (sem iniciar ainda)
 	q := queue.NewQueue(ctx, worker, config)
 
 	// Cria o worker do sensor
@@ -159,6 +159,15 @@ func main() {
 	// WaitGroup para aguardar todos os components terminarem
 	var wg sync.WaitGroup
 
+	// Inicia a queue em uma goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := q.Start(); err != nil && err != context.Canceled {
+			log.Printf("Queue error: %v", err)
+		}
+	}()
+
 	// Inicia o sensor em uma goroutine
 	wg.Add(1)
 	go func() {
@@ -184,20 +193,11 @@ func main() {
 	// Cancela o contexto principal (para sensor worker, queue e web server)
 	cancel()
 
-	// Aguarda todos os components terminarem graciosamente com timeout
-	log.Println("Waiting for components to shutdown...")
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-
-		// Aguarda components externos
 		wg.Wait()
-		log.Println("External components shutdown completed")
-
-		// Aguarda a queue completar seu graceful shutdown
-		log.Println("Waiting for queue to complete graceful shutdown...")
-		q.Wait()
-		log.Println("Queue shutdown completed")
+		log.Println("All components shutdown completed")
 	}()
 
 	select {

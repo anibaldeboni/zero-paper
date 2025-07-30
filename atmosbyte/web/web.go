@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"maps"
 	"net/http"
 	"time"
 
@@ -19,20 +20,17 @@ import (
 //go:embed templates/index.html
 var indexTemplate string
 
-var (
-	systemStartTime = time.Now()
-)
-
 // Server encapsulates the HTTP server configuration and dependencies
 type Server struct {
-	config   *Config
-	htmlData *TemplateData
-	sensor   bme280.Reader
-	template *template.Template
-	server   *http.Server
-	routes   map[string]string  // Armazena as rotas e suas descrições
-	queue    QueueStatsProvider // Interface para obter estatísticas da fila
-	ctx      context.Context    // Contexto para shutdown
+	config          *Config
+	htmlData        *TemplateData
+	sensor          bme280.Reader
+	template        *template.Template
+	server          *http.Server
+	routes          map[string]string  // Armazena as rotas e suas descrições
+	queue           QueueStatsProvider // Interface para obter estatísticas da fila
+	ctx             context.Context    // Contexto para shutdown
+	systemStartTime time.Time          // Thread-safe: set once during initialization
 }
 
 // QueueStatsProvider define a interface para obter estatísticas da fila
@@ -95,11 +93,12 @@ func NewServer(ctx context.Context, sensor bme280.Reader, config *Config, queue 
 	}
 
 	s := &Server{
-		config:   config,
-		sensor:   sensor,
-		template: tmpl,
-		queue:    queue,
-		ctx:      ctx,
+		config:          config,
+		sensor:          sensor,
+		template:        tmpl,
+		queue:           queue,
+		ctx:             ctx,
+		systemStartTime: time.Now(), // Thread-safe: set once during initialization
 		routes: map[string]string{
 			"/":             "Interface web principal",
 			"/health":       "Status de saúde do sistema",
@@ -131,8 +130,12 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 }
 
 // GetRoutes returns the configured routes and their descriptions
+// Thread-safe: creates a copy to avoid concurrent access issues
 func (s *Server) GetRoutes() map[string]string {
-	return s.routes
+	// Create a copy to avoid race conditions on map access
+	routesCopy := make(map[string]string, len(s.routes))
+	maps.Copy(routesCopy, s.routes)
+	return routesCopy
 }
 
 // Start starts the HTTP server and handles graceful shutdown via context
@@ -242,7 +245,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 	// Serve HTML page
 	data := TemplateData{
-		SystemStartTime: systemStartTime.Format("02/01/2006 15:04:05"),
+		SystemStartTime: s.systemStartTime.Format("02/01/2006 15:04:05"),
 		Routes:          s.GetRoutes(),
 		QueueAvailable:  s.queue != nil,
 	}

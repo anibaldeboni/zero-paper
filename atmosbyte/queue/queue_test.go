@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,6 +78,16 @@ type OrderWorker struct {
 	mu              sync.Mutex
 }
 
+func (w *OrderWorker) GetProcessedOrders() []OrderData {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Retorna uma cópia para evitar race conditions
+	result := make([]OrderData, len(w.processedOrders))
+	copy(result, w.processedOrders)
+	return result
+}
+
 func (w *OrderWorker) Process(ctx context.Context, msg queue.Message[OrderData]) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -118,14 +129,46 @@ type EventData struct {
 type MockWorker struct {
 	processFunc func(ctx context.Context, msg OrderData) error
 	calls       []OrderData
+	mu          sync.Mutex
 }
 
 func (m *MockWorker) Process(ctx context.Context, msg queue.Message[OrderData]) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.calls = append(m.calls, msg.Data)
 	if m.processFunc != nil {
 		return m.processFunc(ctx, msg.Data)
 	}
 	return nil
+}
+
+func (m *MockWorker) GetCalls() []OrderData {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]OrderData, len(m.calls))
+	copy(result, m.calls)
+	return result
+}
+
+// startQueueForTest inicia uma queue em background para testes
+func startQueueForTest[T any](t *testing.T, ctx context.Context, worker queue.Worker[T], config queue.QueueConfig) *queue.Queue[T] {
+	t.Helper()
+	q := queue.NewQueue(ctx, worker, config)
+
+	// Inicia a queue em background
+	go func() {
+		if err := q.Start(); err != nil && err != context.Canceled {
+			t.Logf("Queue error: %v", err)
+		}
+	}()
+
+	return q
+}
+
+// createQueueForTest apenas cria uma queue sem iniciar (para testes que querem controlar o Start())
+func createQueueForTest[T any](t *testing.T, ctx context.Context, worker queue.Worker[T], config queue.QueueConfig) *queue.Queue[T] {
+	t.Helper()
+	return queue.NewQueue(ctx, worker, config)
 }
 
 func TestQueue_Basic(t *testing.T) {
@@ -134,7 +177,10 @@ func TestQueue_Basic(t *testing.T) {
 	config.Workers = 1
 	config.BufferSize = 10
 
-	q := queue.NewQueue(t.Context(), worker, config)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	q := startQueueForTest(t, ctx, worker, config)
 
 	// Testa enqueue básico
 	measurement := OrderData{
@@ -151,13 +197,14 @@ func TestQueue_Basic(t *testing.T) {
 	// Aguarda processamento
 	time.Sleep(100 * time.Millisecond)
 
-	if len(worker.calls) != 1 {
-		t.Fatalf("Expected 1 call, got %d", len(worker.calls))
+	calls := worker.GetCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Expected 1 call, got %d", len(calls))
 	}
 
 	// Example: check the Amount field instead (OrderData does not have Temperature)
-	if worker.calls[0].Amount != 100.0 {
-		t.Errorf("Expected amount 100.0, got %f", worker.calls[0].Amount)
+	if calls[0].Amount != 100.0 {
+		t.Errorf("Expected amount 100.0, got %f", calls[0].Amount)
 	}
 }
 
@@ -166,11 +213,11 @@ func TestQueue_Basic(t *testing.T) {
 // ==============================
 
 func TestQueue_Retry(t *testing.T) {
-	callCount := 0
+	var callCount int32
 	worker := &MockWorker{
 		processFunc: func(ctx context.Context, msg OrderData) error {
-			callCount++
-			if callCount < 3 {
+			count := atomic.AddInt32(&callCount, 1)
+			if count < 3 {
 				// Simula erro HTTP 500 (deve ser retentado)
 				return NewHTTPError(500, "Internal Server Error")
 			}
@@ -184,7 +231,10 @@ func TestQueue_Retry(t *testing.T) {
 	config.RetryPolicy.MaxRetries = 3
 	config.RetryPolicy.BaseDelay = 10 * time.Millisecond
 
-	q := queue.NewQueue(t.Context(), worker, config)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	q := startQueueForTest(t, ctx, worker, config)
 
 	measurement := OrderData{
 		ID:       "ORD123",
@@ -200,8 +250,9 @@ func TestQueue_Retry(t *testing.T) {
 	// Aguarda processamento e retries
 	time.Sleep(500 * time.Millisecond)
 
-	if callCount != 3 {
-		t.Errorf("Expected 3 calls (2 retries), got %d", callCount)
+	finalCount := atomic.LoadInt32(&callCount)
+	if finalCount != 3 {
+		t.Errorf("Expected 3 calls (2 retries), got %d", finalCount)
 	}
 }
 
@@ -419,7 +470,10 @@ func TestGenericQueue_CustomType_Main(t *testing.T) {
 	config.RetryPolicy.MaxRetries = 2
 	config.RetryPolicy.BaseDelay = 10 * time.Millisecond
 
-	q := queue.NewQueue(t.Context(), worker, config)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	q := startQueueForTest(t, ctx, worker, config)
 
 	// Testa com pedido normal (sucesso)
 	order1 := OrderData{
@@ -461,12 +515,13 @@ func TestGenericQueue_CustomType_Main(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Verifica se apenas o primeiro pedido foi processado com sucesso
-	if len(worker.processedOrders) != 1 {
-		t.Errorf("Expected 1 processed order, got %d. Orders: %+v", len(worker.processedOrders), worker.processedOrders)
+	processedOrders := worker.GetProcessedOrders()
+	if len(processedOrders) != 1 {
+		t.Errorf("Expected 1 processed order, got %d. Orders: %+v", len(processedOrders), processedOrders)
 	}
 
-	if len(worker.processedOrders) > 0 && worker.processedOrders[0].ID != "ORD001" {
-		t.Errorf("Expected ORD001, got %s", worker.processedOrders[0].ID)
+	if len(processedOrders) > 0 && processedOrders[0].ID != "ORD001" {
+		t.Errorf("Expected ORD001, got %s", processedOrders[0].ID)
 	}
 }
 
@@ -476,9 +531,12 @@ func TestGenericQueue_CustomType_Main(t *testing.T) {
 
 func TestGenericQueue_WorkerFunc_QueueTest(t *testing.T) {
 	var processedMessages []string
+	var mu sync.Mutex
 
 	// Cria um worker usando WorkerFunc
 	workerFunc := queue.WorkerFunc[string](func(ctx context.Context, msg queue.Message[string]) error {
+		mu.Lock()
+		defer mu.Unlock()
 		processedMessages = append(processedMessages, msg.Data)
 		return nil
 	})
@@ -487,7 +545,10 @@ func TestGenericQueue_WorkerFunc_QueueTest(t *testing.T) {
 	config.Workers = 1
 	config.BufferSize = 10
 
-	q := queue.NewQueue(t.Context(), workerFunc, config)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	q := startQueueForTest(t, ctx, workerFunc, config)
 
 	// Envia algumas mensagens
 	messages := []string{"Hello", "World", "from", "Generic", "Queue"}
@@ -502,8 +563,12 @@ func TestGenericQueue_WorkerFunc_QueueTest(t *testing.T) {
 	// Aguarda processamento
 	time.Sleep(100 * time.Millisecond)
 
-	if len(processedMessages) != 5 {
-		t.Errorf("Expected 5 processed messages, got %d", len(processedMessages))
+	mu.Lock()
+	processedCount := len(processedMessages)
+	mu.Unlock()
+
+	if processedCount != 5 {
+		t.Errorf("Expected 5 processed messages, got %d", processedCount)
 	}
 
 	for i, expected := range messages {
@@ -521,6 +586,16 @@ type RetryCounterWorker struct {
 	attemptCounts   map[string]int
 	processedOrders []OrderData
 	mu              sync.Mutex
+}
+
+func (w *RetryCounterWorker) GetProcessedOrders() []OrderData {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Retorna uma cópia para evitar race conditions
+	result := make([]OrderData, len(w.processedOrders))
+	copy(result, w.processedOrders)
+	return result
 }
 
 func (w *RetryCounterWorker) Process(ctx context.Context, msg queue.Message[OrderData]) error {
@@ -556,7 +631,10 @@ func TestGenericQueue_RetryBehavior_Local(t *testing.T) {
 	config.RetryPolicy.MaxRetries = 3
 	config.RetryPolicy.BaseDelay = 10 * time.Millisecond
 
-	q := queue.NewQueue(t.Context(), worker, config)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	q := startQueueForTest(t, ctx, worker, config)
 
 	order := OrderData{
 		ID:       "ORD_RETRY",
@@ -574,8 +652,10 @@ func TestGenericQueue_RetryBehavior_Local(t *testing.T) {
 
 	worker.mu.Lock()
 	attempts := worker.attemptCounts["ORD_RETRY"]
-	processed := len(worker.processedOrders)
 	worker.mu.Unlock()
+
+	processedOrders := worker.GetProcessedOrders()
+	processed := len(processedOrders)
 
 	// Verifica se foram feitas 3 tentativas
 	if attempts != 3 {
@@ -594,9 +674,12 @@ func TestGenericQueue_RetryBehavior_Local(t *testing.T) {
 
 func TestGenericQueue_EventData_Complete(t *testing.T) {
 	var processedEvents []EventData
+	var mu sync.Mutex
 
 	// Worker que processa eventos
 	eventWorker := queue.WorkerFunc[EventData](func(ctx context.Context, msg queue.Message[EventData]) error {
+		mu.Lock()
+		defer mu.Unlock()
 		processedEvents = append(processedEvents, msg.Data)
 		return nil
 	})
@@ -605,7 +688,10 @@ func TestGenericQueue_EventData_Complete(t *testing.T) {
 	config.Workers = 2
 	config.BufferSize = 10
 
-	q := queue.NewQueue(t.Context(), eventWorker, config)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	q := startQueueForTest(t, ctx, eventWorker, config)
 
 	// Envia alguns eventos
 	events := []EventData{
@@ -636,14 +722,19 @@ func TestGenericQueue_EventData_Complete(t *testing.T) {
 	// Aguarda processamento
 	time.Sleep(100 * time.Millisecond)
 
-	if len(processedEvents) != 3 {
-		t.Errorf("Expected 3 processed events, got %d", len(processedEvents))
+	mu.Lock()
+	eventsCopy := make([]EventData, len(processedEvents))
+	copy(eventsCopy, processedEvents)
+	mu.Unlock()
+
+	if len(eventsCopy) != 3 {
+		t.Errorf("Expected 3 processed events, got %d", len(eventsCopy))
 	}
 
 	// Verifica se os tipos dos eventos estão corretos
 	expectedTypes := []string{"user.login", "order.created", "payment.processed"}
-	processedTypes := make([]string, len(processedEvents))
-	for i, event := range processedEvents {
+	processedTypes := make([]string, len(eventsCopy))
+	for i, event := range eventsCopy {
 		processedTypes[i] = event.Type
 	}
 
@@ -769,9 +860,7 @@ func TestGracefulShutdown_Basic(t *testing.T) {
 	config.BufferSize = 10
 
 	ctx, cancel := context.WithCancel(context.Background())
-	q := queue.NewQueue(ctx, worker, config)
-
-	// Envia algumas mensagens
+	q := startQueueForTest(t, ctx, worker, config) // Envia algumas mensagens
 	messages := []string{"msg1", "msg2", "msg3"}
 	for _, msg := range messages {
 		err := q.Enqueue(msg)
@@ -808,7 +897,7 @@ func TestGracefulShutdown_ProcessingInProgress(t *testing.T) {
 	config.BufferSize = 10
 
 	ctx, cancel := context.WithCancel(context.Background())
-	q := queue.NewQueue(ctx, worker, config)
+	q := startQueueForTest(t, ctx, worker, config)
 
 	// Envia uma mensagem que será processada
 	err := q.Enqueue("blocking_message")
@@ -854,7 +943,7 @@ func TestGracefulShutdown_NoNewMessages(t *testing.T) {
 	config.BufferSize = 10
 
 	ctx, cancel := context.WithCancel(context.Background())
-	q := queue.NewQueue(ctx, worker, config)
+	q := startQueueForTest(t, ctx, worker, config)
 
 	// Envia algumas mensagens iniciais
 	for i := 0; i < 3; i++ {
@@ -929,7 +1018,7 @@ func TestGracefulShutdown_RetryBehavior(t *testing.T) {
 	config.RetryPolicy.BaseDelay = 10 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
-	q := queue.NewQueue(ctx, worker, config)
+	q := startQueueForTest(t, ctx, worker, config)
 
 	// Envia mensagem que falhará e precisará de retry
 	measurement := OrderData{
@@ -960,7 +1049,8 @@ func TestGracefulShutdown_RetryBehavior(t *testing.T) {
 		t.Errorf("Expected at most 2 attempts during shutdown, got %d", retryCount)
 	}
 
-	if len(worker.calls) == 0 {
+	calls := worker.GetCalls()
+	if len(calls) == 0 {
 		t.Error("Expected at least one call to worker")
 	}
 }
@@ -973,7 +1063,7 @@ func TestGracefulShutdown_MultipleWorkers(t *testing.T) {
 	config.BufferSize = 20
 
 	ctx, cancel := context.WithCancel(context.Background())
-	q := queue.NewQueue(ctx, worker, config)
+	q := startQueueForTest(t, ctx, worker, config)
 
 	// Envia muitas mensagens para multiple workers
 	numMessages := 10
@@ -1022,7 +1112,7 @@ func TestGracefulShutdown_QueueStats(t *testing.T) {
 	config.BufferSize = 10
 
 	ctx, cancel := context.WithCancel(context.Background())
-	q := queue.NewQueue(ctx, worker, config)
+	q := startQueueForTest(t, ctx, worker, config)
 
 	// Envia várias mensagens
 	for i := 0; i < 5; i++ {
@@ -1065,8 +1155,8 @@ func TestGracefulShutdown_QueueStats(t *testing.T) {
 	t.Logf("Final processed messages: %v", processedMessages)
 }
 
-// TestQueue_WaitMethod testa o método Wait() da queue
-func TestQueue_WaitMethod(t *testing.T) {
+// TestQueue_StartMethod testa o método Start() da queue
+func TestQueue_StartMethod(t *testing.T) {
 	worker := NewTrackingWorker(30 * time.Millisecond)
 
 	config := queue.DefaultQueueConfig()
@@ -1074,11 +1164,17 @@ func TestQueue_WaitMethod(t *testing.T) {
 	config.BufferSize = 10
 
 	ctx, cancel := context.WithCancel(context.Background())
-	q := queue.NewQueue(ctx, worker, config)
+	q := createQueueForTest(t, ctx, worker, config)
+
+	// Inicia a queue em uma goroutine
+	done := make(chan error, 1)
+	go func() {
+		done <- q.Start()
+	}()
 
 	// Envia algumas mensagens
 	for i := 0; i < 5; i++ {
-		err := q.Enqueue(fmt.Sprintf("wait_test_msg_%d", i))
+		err := q.Enqueue(fmt.Sprintf("start_test_msg_%d", i))
 		if err != nil {
 			t.Fatalf("Failed to enqueue message: %v", err)
 		}
@@ -1088,14 +1184,19 @@ func TestQueue_WaitMethod(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Cancela o contexto para iniciar shutdown
+	start := time.Now()
 	cancel()
 
-	// Testa o método Wait()
-	start := time.Now()
-	q.Wait()
+	// Aguarda Start() completar
+	err := <-done
 	duration := time.Since(start)
 
-	t.Logf("Queue.Wait() completed in %v", duration)
+	t.Logf("Queue.Start() completed in %v with error: %v", duration, err)
+
+	// Deve retornar context.Canceled
+	if err != context.Canceled {
+		t.Errorf("Expected context.Canceled, got %v", err)
+	}
 
 	// Verifica se algumas mensagens foram processadas
 	processedMessages := worker.GetProcessedMessages()
@@ -1105,9 +1206,9 @@ func TestQueue_WaitMethod(t *testing.T) {
 		t.Error("Expected at least some messages to be processed")
 	}
 
-	// Verifica se Wait() realmente aguardou o shutdown completo
+	// Verifica se Start() realmente aguardou o shutdown completo
 	// (deve ter levado pelo menos o tempo de processamento de algumas mensagens)
 	if duration < 10*time.Millisecond {
-		t.Errorf("Wait() completed too quickly (%v), might not have waited for shutdown", duration)
+		t.Errorf("Start() completed too quickly (%v), might not have waited for shutdown", duration)
 	}
 }

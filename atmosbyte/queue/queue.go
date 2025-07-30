@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -93,9 +94,12 @@ type Queue[T any] struct {
 	wg             sync.WaitGroup
 	ctx            context.Context
 	cancel         context.CancelFunc
+	shutdownOnce   sync.Once    // Garante que shutdown só aconteça uma vez
+	shutdownFlag   int64        // Flag atômica para indicar shutdown (0 = normal, 1 = shutdown)
+	retryMutex     sync.RWMutex // Protege acesso ao retryQueue durante shutdown
 }
 
-// NewQueue cria uma nova instância da fila
+// NewQueue cria uma nova instância da fila (não inicia os workers)
 func NewQueue[T any](ctx context.Context, worker Worker[T], config QueueConfig) *Queue[T] {
 	queueCtx, cancel := context.WithCancel(ctx)
 
@@ -108,12 +112,20 @@ func NewQueue[T any](ctx context.Context, worker Worker[T], config QueueConfig) 
 			config.CircuitBreakerConfig.FailureThreshold,
 			config.CircuitBreakerConfig.Timeout,
 		),
-		ctx:    queueCtx,
-		cancel: cancel,
+		ctx:          queueCtx,
+		cancel:       cancel,
+		shutdownFlag: 0, // Inicializa como não shutdown
 	}
 
+	return q
+}
+
+// Start inicia todos os workers da queue e bloqueia até o contexto ser cancelado
+func (q *Queue[T]) Start() error {
+	log.Printf("Starting queue with %d workers", q.config.Workers)
+
 	// Inicia os workers
-	for i := 0; i < config.Workers; i++ {
+	for i := 0; i < q.config.Workers; i++ {
 		q.wg.Add(1)
 		go q.workerLoop(i)
 	}
@@ -126,7 +138,14 @@ func NewQueue[T any](ctx context.Context, worker Worker[T], config QueueConfig) 
 	q.wg.Add(1)
 	go q.gracefulShutdownMonitor()
 
-	return q
+	// Aguarda o contexto ser cancelado
+	<-q.ctx.Done()
+
+	// Aguarda todos os workers terminarem graciosamente
+	q.wg.Wait()
+
+	log.Println("Queue shutdown completed")
+	return q.ctx.Err()
 }
 
 // Enqueue adiciona uma nova mensagem à fila
@@ -167,6 +186,14 @@ func (q *Queue[T]) gracefulShutdownMonitor() {
 
 	log.Println("Queue: Starting graceful shutdown...")
 
+	// Sinaliza que shutdown foi iniciado usando sync.Once (thread-safe)
+	q.shutdownOnce.Do(func() {
+		atomic.StoreInt64(&q.shutdownFlag, 1)
+		// Protege o fechamento do retryQueue
+		q.retryMutex.Lock()
+		defer q.retryMutex.Unlock()
+	})
+
 	// Para de aceitar novas mensagens fechando o canal de entrada
 	close(q.messages)
 
@@ -182,10 +209,17 @@ func (q *Queue[T]) gracefulShutdownMonitor() {
 		// Pequeno delay para permitir que workers processem mensagens restantes
 	}
 
-	// Fecha o canal de retry após delay
+	// Fecha o canal de retry após delay, protegido por mutex
+	q.retryMutex.Lock()
 	close(q.retryQueue)
+	q.retryMutex.Unlock()
 
 	log.Println("Queue: Graceful shutdown completed")
+}
+
+// isShuttingDown verifica se shutdown foi iniciado de forma thread-safe
+func (q *Queue[T]) isShuttingDown() bool {
+	return atomic.LoadInt64(&q.shutdownFlag) == 1
 }
 
 // workerLoop é o loop principal de processamento de cada worker
@@ -292,9 +326,8 @@ func (q *Queue[T]) sendToMainQueue(msg Message[T], failureMsg string) {
 	select {
 	case q.messages <- msg:
 		// Mensagem enviada com sucesso
-	case <-q.ctx.Done():
-		log.Printf("RetryLoop: Dropping message %s due to shutdown", msg.ID)
 	default:
+		// Canal está fechado, cheio ou em shutdown - descarta mensagem
 		log.Printf(failureMsg+" %s", msg.ID)
 	}
 }
@@ -309,22 +342,36 @@ func (q *Queue[T]) handleShutdownRetries() {
 	}()
 
 	for {
+		// Verifica se está em shutdown antes de tentar ler
+		if q.isShuttingDown() {
+			log.Println("RetryLoop: Context cancelled, shutting down")
+			return
+		}
+
+		// Protege acesso ao retryQueue durante shutdown
+		q.retryMutex.RLock()
+		if q.isShuttingDown() {
+			q.retryMutex.RUnlock()
+			log.Println("RetryLoop: Context cancelled, shutting down")
+			return
+		}
+
 		select {
 		case msg, ok := <-q.retryQueue:
+			q.retryMutex.RUnlock()
 			if !ok {
 				return
 			}
-			// Durante shutdown, processa imediatamente
-			// Verifica se o canal ainda está aberto antes de tentar enviar
+			// Durante shutdown, processa imediatamente usando select não-bloqueante
 			select {
 			case q.messages <- msg:
 				log.Printf("RetryLoop: Sent message %s for immediate processing due to shutdown", msg.ID)
-			case <-q.ctx.Done():
-				log.Printf("RetryLoop: Dropping message %s due to shutdown", msg.ID)
 			default:
+				// Canal está fechado ou cheio - descarta mensagem
 				log.Printf("RetryLoop: Dropping message %s due to shutdown", msg.ID)
 			}
 		default:
+			q.retryMutex.RUnlock()
 			log.Println("RetryLoop: Context cancelled, shutting down")
 			return
 		}
@@ -390,6 +437,22 @@ func (q *Queue[T]) handleProcessingResult(pc *ProcessingContext[T], result Proce
 func (q *Queue[T]) handleRetryAttempt(pc *ProcessingContext[T]) {
 	pc.LogRetryAction()
 
+	// Verifica se está em shutdown
+	if q.isShuttingDown() {
+		pc.LogDrop("Retry queue unavailable, dropping message")
+		return
+	}
+
+	// Protege acesso ao retryQueue durante shutdown
+	q.retryMutex.RLock()
+	defer q.retryMutex.RUnlock()
+
+	// Verifica novamente após adquirir o lock
+	if q.isShuttingDown() {
+		pc.LogDrop("Retry queue unavailable, dropping message")
+		return
+	}
+
 	select {
 	case q.retryQueue <- pc.Message:
 		// Mensagem enviada para retry
@@ -398,11 +461,6 @@ func (q *Queue[T]) handleRetryAttempt(pc *ProcessingContext[T]) {
 	default:
 		pc.LogDrop("Retry queue full, dropping message")
 	}
-}
-
-// Wait aguarda o shutdown completo de todos os workers da queue
-func (q *Queue[T]) Wait() {
-	q.wg.Wait()
 }
 
 // Stats retorna estatísticas da fila
