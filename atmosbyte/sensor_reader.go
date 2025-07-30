@@ -7,18 +7,19 @@ import (
 	"time"
 
 	"github.com/anibaldeboni/zero-paper/atmosbyte/bme280"
+	"github.com/anibaldeboni/zero-paper/atmosbyte/queue"
 )
 
 // SensorReader é responsável por ler dados de qualquer sensor e enviá-los para a fila
 type SensorReader struct {
 	sensor   bme280.Reader
-	queue    *MeasurementQueue
+	queue    *queue.Queue[bme280.Measurement]
 	interval time.Duration
 	name     string // nome do sensor para logs
 }
 
 // NewSensorReader cria um novo worker genérico de sensor
-func NewSensorReader(sensor bme280.Reader, queue *MeasurementQueue, interval time.Duration, name string) *SensorReader {
+func NewSensorReader(sensor bme280.Reader, queue *queue.Queue[bme280.Measurement], interval time.Duration, name string) *SensorReader {
 	return &SensorReader{
 		sensor:   sensor,
 		queue:    queue,
