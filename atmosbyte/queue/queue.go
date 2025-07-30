@@ -400,6 +400,11 @@ func (q *Queue[T]) handleRetryAttempt(pc *ProcessingContext[T]) {
 	}
 }
 
+// Wait aguarda o shutdown completo de todos os workers da queue
+func (q *Queue[T]) Wait() {
+	q.wg.Wait()
+}
+
 // Stats retorna estatísticas da fila
 func (q *Queue[T]) Stats() QueueStats {
 	return QueueStats{

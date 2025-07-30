@@ -124,7 +124,7 @@ func main() {
 	defer cancel()
 
 	// Cria a fila para processar measurements (agora com contexto)
-	q := NewMeasurementQueue(ctx, worker, config)
+	q := queue.NewQueue(ctx, worker, config)
 
 	// Cria o worker do sensor
 	var (
@@ -188,8 +188,16 @@ func main() {
 	log.Println("Waiting for components to shutdown...")
 	done := make(chan struct{})
 	go func() {
+		defer close(done)
+
+		// Aguarda components externos
 		wg.Wait()
-		close(done)
+		log.Println("External components shutdown completed")
+
+		// Aguarda a queue completar seu graceful shutdown
+		log.Println("Waiting for queue to complete graceful shutdown...")
+		q.Wait()
+		log.Println("Queue shutdown completed")
 	}()
 
 	select {

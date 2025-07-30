@@ -1064,3 +1064,50 @@ func TestGracefulShutdown_QueueStats(t *testing.T) {
 	processedMessages := worker.GetProcessedMessages()
 	t.Logf("Final processed messages: %v", processedMessages)
 }
+
+// TestQueue_WaitMethod testa o método Wait() da queue
+func TestQueue_WaitMethod(t *testing.T) {
+	worker := NewTrackingWorker(30 * time.Millisecond)
+
+	config := queue.DefaultQueueConfig()
+	config.Workers = 2
+	config.BufferSize = 10
+
+	ctx, cancel := context.WithCancel(context.Background())
+	q := queue.NewQueue(ctx, worker, config)
+
+	// Envia algumas mensagens
+	for i := 0; i < 5; i++ {
+		err := q.Enqueue(fmt.Sprintf("wait_test_msg_%d", i))
+		if err != nil {
+			t.Fatalf("Failed to enqueue message: %v", err)
+		}
+	}
+
+	// Aguarda um pouco para processamento começar
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancela o contexto para iniciar shutdown
+	cancel()
+
+	// Testa o método Wait()
+	start := time.Now()
+	q.Wait()
+	duration := time.Since(start)
+
+	t.Logf("Queue.Wait() completed in %v", duration)
+
+	// Verifica se algumas mensagens foram processadas
+	processedMessages := worker.GetProcessedMessages()
+	t.Logf("Processed messages: %v", processedMessages)
+
+	if len(processedMessages) == 0 {
+		t.Error("Expected at least some messages to be processed")
+	}
+
+	// Verifica se Wait() realmente aguardou o shutdown completo
+	// (deve ter levado pelo menos o tempo de processamento de algumas mensagens)
+	if duration < 10*time.Millisecond {
+		t.Errorf("Wait() completed too quickly (%v), might not have waited for shutdown", duration)
+	}
+}
