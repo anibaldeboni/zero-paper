@@ -109,6 +109,11 @@ func (s *Sensor) Read() (Measurement, error) {
 	return measurement, nil
 }
 
+// Name returns the sensor type name
+func (s *Sensor) Name() string {
+	return "BME280"
+}
+
 // Close fecha a conexão com o sensor e libera os recursos
 func (s *Sensor) Close() error {
 	s.mu.Lock()
@@ -153,6 +158,7 @@ type Provider interface {
 // Hardware sensor returns pointer, simulated returns value
 type Reader interface {
 	Read() (Measurement, error)
+	Name() string
 }
 
 // SimulatedSensor provides simulated BME280 sensor data for testing and development
@@ -241,6 +247,11 @@ func (s *SimulatedSensor) Read() (Measurement, error) {
 	}, nil
 }
 
+// Name returns the sensor type name
+func (s *SimulatedSensor) Name() string {
+	return "Simulated"
+}
+
 // Close implements Provider interface
 func (s *SimulatedSensor) Close() error {
 	s.mu.Lock()
@@ -254,5 +265,6 @@ func (s *SimulatedSensor) Close() error {
 var (
 	_ Provider = (*Sensor)(nil)
 	_ Provider = (*SimulatedSensor)(nil)
+	_ Reader   = (*Sensor)(nil)
 	_ Reader   = (*SimulatedSensor)(nil)
 )

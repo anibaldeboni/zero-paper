@@ -25,7 +25,7 @@ func (s *Server) handleMeasurements(w http.ResponseWriter, r *http.Request) {
 		Temperature: measurement.Temperature,
 		Humidity:    measurement.Humidity,
 		Pressure:    float64(measurement.Pressure),
-		Source:      "BME280",
+		Source:      s.sensor.Name(),
 	}
 
 	s.sendJSONResponse(w, response, http.StatusOK)

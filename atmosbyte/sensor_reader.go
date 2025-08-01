@@ -19,12 +19,12 @@ type SensorReader struct {
 }
 
 // NewSensorReader cria um novo worker genérico de sensor
-func NewSensorReader(sensor bme280.Reader, queue *queue.Queue[bme280.Measurement], interval time.Duration, name string) *SensorReader {
+func NewSensorReader(sensor bme280.Reader, queue *queue.Queue[bme280.Measurement], interval time.Duration) *SensorReader {
 	return &SensorReader{
 		sensor:   sensor,
 		queue:    queue,
 		interval: interval,
-		name:     name,
+		name:     sensor.Name(),
 	}
 }
 

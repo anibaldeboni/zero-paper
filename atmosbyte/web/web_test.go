@@ -35,6 +35,10 @@ func (m *MockSensorProvider) Read() (bme280.Measurement, error) {
 	return m.measurement, m.err
 }
 
+func (m *MockSensorProvider) Name() string {
+	return "BME280"
+}
+
 // MockQueueStatsProvider implements QueueStatsProvider for testing
 type MockQueueStatsProvider struct {
 	stats queue.QueueStats
