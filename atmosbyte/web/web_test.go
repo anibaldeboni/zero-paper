@@ -14,6 +14,17 @@ import (
 	"github.com/anibaldeboni/zero-paper/atmosbyte/queue"
 )
 
+// testConfig returns a default configuration for testing
+func testConfig() *Config {
+	return &Config{
+		Port:            8080,
+		ReadTimeout:     10 * time.Second,
+		WriteTimeout:    10 * time.Second,
+		IdleTimeout:     120 * time.Second,
+		ShutdownTimeout: 30 * time.Second,
+	}
+}
+
 // MockSensorProvider implements SensorProvider for testing
 type MockSensorProvider struct {
 	measurement bme280.Measurement
@@ -43,7 +54,7 @@ var queueProvider = &MockQueueStatsProvider{
 
 func TestNewServer(t *testing.T) {
 	sensor := &MockSensorProvider{}
-	config := DefaultConfig()
+	config := testConfig()
 
 	server := NewServer(t.Context(), sensor, config, queueProvider)
 
@@ -61,7 +72,7 @@ func TestNewServer(t *testing.T) {
 }
 
 func TestDefaultConfig(t *testing.T) {
-	config := DefaultConfig()
+	config := testConfig()
 
 	if config.Port != 8080 {
 		t.Errorf("Expected port 8080, got %d", config.Port)
@@ -74,7 +85,8 @@ func TestDefaultConfig(t *testing.T) {
 
 func TestGetRoutes(t *testing.T) {
 	sensor := &MockSensorProvider{}
-	server := NewServer(t.Context(), sensor, nil, queueProvider)
+	config := testConfig()
+	server := NewServer(t.Context(), sensor, config, queueProvider)
 
 	routes := server.GetRoutes()
 
@@ -99,7 +111,7 @@ func TestHandleMeasurements_Success(t *testing.T) {
 	}
 
 	sensor := &MockSensorProvider{measurement: measurement}
-	server := NewServer(t.Context(), sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, testConfig(), queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/measurements", nil)
 	w := httptest.NewRecorder()
@@ -140,7 +152,7 @@ func TestHandleMeasurements_WorkingSensor(t *testing.T) {
 	}
 
 	sensor := &MockSensorProvider{measurement: measurement}
-	server := NewServer(t.Context(), sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, testConfig(), queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/measurements", nil)
 	w := httptest.NewRecorder()
@@ -157,7 +169,7 @@ func TestHandleMeasurements_WorkingSensor(t *testing.T) {
 
 func TestHandleMeasurements_SensorError(t *testing.T) {
 	sensor := &MockSensorProvider{err: errors.New("sensor read error")}
-	server := NewServer(t.Context(), sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, testConfig(), queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/measurements", nil)
 	w := httptest.NewRecorder()
@@ -180,7 +192,7 @@ func TestHandleMeasurements_SensorError(t *testing.T) {
 
 func TestHandleMeasurements_MethodNotAllowed(t *testing.T) {
 	sensor := &MockSensorProvider{}
-	server := NewServer(t.Context(), sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, testConfig(), queueProvider)
 
 	req := httptest.NewRequest(http.MethodPost, "/measurements", nil)
 	w := httptest.NewRecorder()
@@ -195,7 +207,7 @@ func TestHandleMeasurements_MethodNotAllowed(t *testing.T) {
 func TestHandleHealth(t *testing.T) {
 	measurement := bme280.Measurement{Temperature: 25.0, Humidity: 50.0, Pressure: 101325}
 	sensor := &MockSensorProvider{measurement: measurement}
-	server := NewServer(t.Context(), sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, testConfig(), queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -222,7 +234,7 @@ func TestHandleHealth(t *testing.T) {
 
 func TestHandleHealth_WorkingSensor(t *testing.T) {
 	sensor := &MockSensorProvider{}
-	server := NewServer(t.Context(), sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, testConfig(), queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -239,7 +251,7 @@ func TestHandleHealth_WorkingSensor(t *testing.T) {
 
 func TestHandleRoot_HTML(t *testing.T) {
 	sensor := &MockSensorProvider{}
-	server := NewServer(t.Context(), sensor, nil, queueProvider)
+	server := NewServer(t.Context(), sensor, testConfig(), queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -273,7 +285,7 @@ func BenchmarkHandleMeasurements(b *testing.B) {
 	}
 
 	sensor := &MockSensorProvider{measurement: measurement}
-	server := NewServer(context.Background(), sensor, nil, queueProvider)
+	server := NewServer(context.Background(), sensor, testConfig(), queueProvider)
 
 	req := httptest.NewRequest(http.MethodGet, "/measurements", nil)
 

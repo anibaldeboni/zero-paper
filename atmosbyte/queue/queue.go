@@ -33,7 +33,7 @@ func NewProcessingContext[T any](q *Queue[T], msg Message[T], workerID int) *Pro
 // GetProcessingContext cria contexto de execução com timeout adequado
 func (pc *ProcessingContext[T]) GetProcessingContext() (context.Context, context.CancelFunc) {
 	if pc.IsShutdown {
-		return context.WithTimeout(context.Background(), 5*time.Second)
+		return context.WithTimeout(context.Background(), pc.Queue.config.ProcessingTimeout)
 	}
 	return pc.Queue.ctx, func() {}
 }
@@ -198,7 +198,7 @@ func (q *Queue[T]) gracefulShutdownMonitor() {
 	close(q.messages)
 
 	// Aguarda um timeout para que workers processem mensagens pendentes
-	shutdownTimeout := 30 * time.Second
+	shutdownTimeout := q.config.ShutdownTimeout
 	shutdownTimer := time.NewTimer(shutdownTimeout)
 	defer shutdownTimer.Stop()
 

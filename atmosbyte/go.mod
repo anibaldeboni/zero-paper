@@ -7,3 +7,5 @@ require (
 	periph.io/x/devices/v3 v3.7.4
 	periph.io/x/host/v3 v3.8.5
 )
+
+require gopkg.in/yaml.v3 v3.0.1

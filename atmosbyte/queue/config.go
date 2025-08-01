@@ -8,25 +8,14 @@ type QueueConfig struct {
 	BufferSize           int
 	RetryPolicy          RetryPolicy
 	CircuitBreakerConfig CircuitBreakerConfig
+	ShutdownTimeout      time.Duration // Timeout para shutdown gracioso
+	ProcessingTimeout    time.Duration // Timeout para processamento durante shutdown
 }
 
 // CircuitBreakerConfig define a configuração do circuit breaker
 type CircuitBreakerConfig struct {
 	FailureThreshold int
 	Timeout          time.Duration
-}
-
-// DefaultQueueConfig retorna uma configuração padrão para a fila
-func DefaultQueueConfig() QueueConfig {
-	return QueueConfig{
-		Workers:     3,
-		BufferSize:  100,
-		RetryPolicy: DefaultRetryPolicy(),
-		CircuitBreakerConfig: CircuitBreakerConfig{
-			FailureThreshold: 5,
-			Timeout:          30 * time.Second,
-		},
-	}
 }
 
 // QueueStats representa estatísticas da fila

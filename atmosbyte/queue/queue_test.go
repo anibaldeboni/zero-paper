@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anibaldeboni/zero-paper/atmosbyte/config"
 	"github.com/anibaldeboni/zero-paper/atmosbyte/queue"
 )
 
@@ -173,7 +174,7 @@ func createQueueForTest[T any](t *testing.T, ctx context.Context, worker queue.W
 
 func TestQueue_Basic(t *testing.T) {
 	worker := &MockWorker{}
-	config := queue.DefaultQueueConfig()
+	config := config.TestQueueConfig()
 	config.Workers = 1
 	config.BufferSize = 10
 
@@ -225,7 +226,7 @@ func TestQueue_Retry(t *testing.T) {
 		},
 	}
 
-	config := queue.DefaultQueueConfig()
+	config := config.TestQueueConfig()
 	config.Workers = 1
 	config.BufferSize = 10
 	config.RetryPolicy.MaxRetries = 3
@@ -464,7 +465,7 @@ func TestShouldRetryDuringShutdown(t *testing.T) {
 
 func TestGenericQueue_CustomType_Main(t *testing.T) {
 	worker := &OrderWorker{}
-	config := queue.DefaultQueueConfig()
+	config := config.TestQueueConfig()
 	config.Workers = 1
 	config.BufferSize = 10
 	config.RetryPolicy.MaxRetries = 2
@@ -541,7 +542,7 @@ func TestGenericQueue_WorkerFunc_QueueTest(t *testing.T) {
 		return nil
 	})
 
-	config := queue.DefaultQueueConfig()
+	config := config.TestQueueConfig()
 	config.Workers = 1
 	config.BufferSize = 10
 
@@ -625,7 +626,7 @@ func TestGenericQueue_RetryBehavior_Local(t *testing.T) {
 		attemptCounts: make(map[string]int),
 	}
 
-	config := queue.DefaultQueueConfig()
+	config := config.TestQueueConfig()
 	config.Workers = 1
 	config.BufferSize = 10
 	config.RetryPolicy.MaxRetries = 3
@@ -684,7 +685,7 @@ func TestGenericQueue_EventData_Complete(t *testing.T) {
 		return nil
 	})
 
-	config := queue.DefaultQueueConfig()
+	config := config.TestQueueConfig()
 	config.Workers = 2
 	config.BufferSize = 10
 
@@ -855,7 +856,7 @@ func (w *TrackingWorker) WaitForProcessingStart() {
 func TestGracefulShutdown_Basic(t *testing.T) {
 	worker := NewTrackingWorker(50 * time.Millisecond)
 
-	config := queue.DefaultQueueConfig()
+	config := config.TestQueueConfig()
 	config.Workers = 2
 	config.BufferSize = 10
 
@@ -892,7 +893,7 @@ func TestGracefulShutdown_ProcessingInProgress(t *testing.T) {
 	worker := NewTrackingWorker(0) // Sem delay automático
 	worker.SetBlocking(true)       // Controle manual do bloqueio
 
-	config := queue.DefaultQueueConfig()
+	config := config.TestQueueConfig()
 	config.Workers = 1
 	config.BufferSize = 10
 
@@ -938,7 +939,7 @@ func TestGracefulShutdown_ProcessingInProgress(t *testing.T) {
 func TestGracefulShutdown_NoNewMessages(t *testing.T) {
 	worker := NewTrackingWorker(10 * time.Millisecond)
 
-	config := queue.DefaultQueueConfig()
+	config := config.TestQueueConfig()
 	config.Workers = 1
 	config.BufferSize = 10
 
@@ -1011,7 +1012,7 @@ func TestGracefulShutdown_RetryBehavior(t *testing.T) {
 		},
 	}
 
-	config := queue.DefaultQueueConfig()
+	config := config.TestQueueConfig()
 	config.Workers = 1
 	config.BufferSize = 10
 	config.RetryPolicy.MaxRetries = 3
@@ -1058,7 +1059,7 @@ func TestGracefulShutdown_RetryBehavior(t *testing.T) {
 func TestGracefulShutdown_MultipleWorkers(t *testing.T) {
 	worker := NewTrackingWorker(30 * time.Millisecond)
 
-	config := queue.DefaultQueueConfig()
+	config := config.TestQueueConfig()
 	config.Workers = 3
 	config.BufferSize = 20
 
@@ -1107,7 +1108,7 @@ func TestGracefulShutdown_MultipleWorkers(t *testing.T) {
 func TestGracefulShutdown_QueueStats(t *testing.T) {
 	worker := NewTrackingWorker(100 * time.Millisecond) // Processamento lento
 
-	config := queue.DefaultQueueConfig()
+	config := config.TestQueueConfig()
 	config.Workers = 1
 	config.BufferSize = 10
 
@@ -1159,7 +1160,7 @@ func TestGracefulShutdown_QueueStats(t *testing.T) {
 func TestQueue_StartMethod(t *testing.T) {
 	worker := NewTrackingWorker(30 * time.Millisecond)
 
-	config := queue.DefaultQueueConfig()
+	config := config.TestQueueConfig()
 	config.Workers = 2
 	config.BufferSize = 10
 

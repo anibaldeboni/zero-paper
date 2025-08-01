@@ -33,7 +33,7 @@ type Server struct {
 // Optionally accepts a queue parameter for queue monitoring functionality
 func NewServer(ctx context.Context, sensor bme280.Reader, config *Config, queue QueueStatsProvider) *Server {
 	if config == nil {
-		config = DefaultConfig()
+		panic("web.Config cannot be nil - use config.Load().WebConfig() instead")
 	}
 
 	// Compile the HTML template
@@ -105,7 +105,7 @@ func (s *Server) Start() error {
 
 	select {
 	case <-s.ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.config.ShutdownTimeout)
 		defer cancel()
 
 		if err := s.server.Shutdown(shutdownCtx); err != nil {

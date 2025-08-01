@@ -1,0 +1,14 @@
+web:
+  port: 9090
+  read_timeout: 5s
+
+queue:
+  workers: 1
+  buffer_size: 10
+
+sensor:
+  type: "simulated"
+  read_interval: 2s
+
+timeouts:
+  shutdown_timeout: 3s

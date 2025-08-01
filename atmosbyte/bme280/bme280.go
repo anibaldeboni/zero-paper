@@ -38,8 +38,8 @@ type Config struct {
 	Options *bmxx80.Opts // Opções avançadas (nil para padrão)
 }
 
-// DefaultConfig retorna uma configuração padrão para o sensor
-func DefaultConfig() *Config {
+// defaultConfig retorna uma configuração padrão para o sensor (interno)
+func defaultConfig() *Config {
 	return &Config{
 		Address: 0x76,
 		BusName: "",
@@ -50,7 +50,7 @@ func DefaultConfig() *Config {
 // NewSensor cria uma nova instância do sensor BME280
 func NewSensor(config *Config) (*Sensor, error) {
 	if config == nil {
-		config = DefaultConfig()
+		config = defaultConfig()
 	}
 
 	if config.Options == nil {
@@ -174,20 +174,17 @@ type SimulatedConfig struct {
 	// Pressure range in Pascal
 	MinPressure int64
 	MaxPressure int64
-	// Random seed (0 for time-based)
-	Seed int64
 }
 
 // DefaultSimulatedConfig returns sensible defaults for simulated sensor
 func DefaultSimulatedConfig() *SimulatedConfig {
 	return &SimulatedConfig{
-		MinTemp:     15.0,   // 15°C
-		MaxTemp:     35.0,   // 35°C
-		MinHumidity: 30.0,   // 30%
-		MaxHumidity: 80.0,   // 80%
-		MinPressure: 95000,  // 95kPa
-		MaxPressure: 105000, // 105kPa
-		Seed:        0,      // Use current time
+		MinTemp:     15.0,   // Minimum temperature in Celsius
+		MaxTemp:     35.0,   // Maximum temperature in Celsius
+		MinHumidity: 30.0,   // Minimum humidity percentage
+		MaxHumidity: 80.0,   // Maximum humidity percentage
+		MinPressure: 98000,  // Minimum pressure in Pa
+		MaxPressure: 102000, // Maximum pressure in Pa
 	}
 }
 
@@ -197,9 +194,19 @@ func NewSimulatedSensor(config *SimulatedConfig) *SimulatedSensor {
 		config = DefaultSimulatedConfig()
 	}
 
-	seed := config.Seed
-	if seed == 0 {
-		seed = time.Now().UnixNano()
+	// Always use time-based seed for randomness
+	seed := time.Now().UnixNano()
+
+	return &SimulatedSensor{
+		config: config,
+		rand:   rand.New(rand.NewSource(seed)),
+	}
+}
+
+// newSimulatedSensorWithSeed creates a sensor with fixed seed (for testing)
+func newSimulatedSensorWithSeed(config *SimulatedConfig, seed int64) *SimulatedSensor {
+	if config == nil {
+		config = DefaultSimulatedConfig()
 	}
 
 	return &SimulatedSensor{

@@ -5,7 +5,7 @@ import (
 )
 
 func TestDefaultConfig(t *testing.T) {
-	config := DefaultConfig()
+	config := defaultConfig()
 
 	if config.Address != 0x76 {
 		t.Errorf("Expected default address 0x76, got 0x%02X", config.Address)
@@ -40,9 +40,13 @@ func TestNewSensorWithNilConfig(t *testing.T) {
 	// mas verifica se a lógica de configuração padrão funciona
 
 	// Simula a criação com config nil
-	config := DefaultConfig()
+	config := &Config{
+		Address: 0x76,
+		BusName: "",
+		Options: nil,
+	}
 	if config == nil {
-		t.Error("DefaultConfig should not return nil")
+		t.Error("Config should not return nil")
 	}
 
 	// Verifica se os valores padrão estão corretos
@@ -87,7 +91,7 @@ func TestConfigValidation(t *testing.T) {
 			// Como não temos hardware, apenas testamos a lógica de configuração
 			config := tt.config
 			if config == nil {
-				config = DefaultConfig()
+				config = &Config{Address: 0x76, BusName: "", Options: nil}
 			}
 
 			if config.Options == nil {
@@ -183,7 +187,7 @@ func BenchmarkMeasurementString(b *testing.B) {
 func BenchmarkDefaultConfig(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = DefaultConfig()
+		_ = &Config{Address: 0x76, BusName: "", Options: nil}
 	}
 }
 
@@ -240,10 +244,9 @@ func TestSimulatedSensorConfig(t *testing.T) {
 		MaxHumidity: 60.0,
 		MinPressure: 100000,
 		MaxPressure: 102000,
-		Seed:        12345, // Fixed seed for reproducible tests
 	}
 
-	sensor2 := NewSimulatedSensor(customConfig)
+	sensor2 := newSimulatedSensorWithSeed(customConfig, 12345) // Fixed seed for reproducible tests
 	defer sensor2.Close()
 
 	measurement2, err := sensor2.Read()
@@ -260,15 +263,13 @@ func TestSimulatedSensorConfig(t *testing.T) {
 
 func TestSimulatedSensorReproducibility(t *testing.T) {
 	// Test that same seed produces same results
-	config := &SimulatedConfig{
-		Seed: 12345,
-	}
+	config := &SimulatedConfig{}
 
-	sensor1 := NewSimulatedSensor(config)
+	sensor1 := newSimulatedSensorWithSeed(config, 12345)
 	measurement1, _ := sensor1.Read()
 	sensor1.Close()
 
-	sensor2 := NewSimulatedSensor(config)
+	sensor2 := newSimulatedSensorWithSeed(config, 12345)
 	measurement2, _ := sensor2.Read()
 	sensor2.Close()
 
