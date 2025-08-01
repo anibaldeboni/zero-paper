@@ -18,6 +18,45 @@ import (
 	"github.com/anibaldeboni/zero-paper/atmosbyte/web"
 )
 
+// SensorSetup encapsula os componentes do sensor
+type SensorSetup struct {
+	dev     bme280.Reader
+	reader  *SensorReader
+	cleanup func() error // função para cleanup (close do sensor se necessário)
+}
+
+// createSensorSetup cria o sensor e seus componentes baseado na configuração
+func createSensorSetup(cfg *config.AppConfig, q *queue.Queue[bme280.Measurement]) (*SensorSetup, error) {
+	var sensor bme280.Reader
+	var cleanup func() error
+
+	switch cfg.Sensor.Type {
+	case "simulated":
+		log.Println("Using simulated sensor data")
+		simSensor := bme280.NewSimulatedSensor(cfg.SimulatedConfig())
+		sensor = simSensor
+		cleanup = simSensor.Close
+
+	default: // hardware BME280
+		log.Println("Attempting to use BME280 hardware sensor")
+		hwSensor, err := bme280.NewSensor(cfg.BME280Config())
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize BME280 sensor: %w", err)
+		}
+		log.Println("BME280 sensor initialized successfully")
+		sensor = hwSensor
+		cleanup = hwSensor.Close
+	}
+
+	sensorReader := NewSensorReader(sensor, q, cfg.Sensor.ReadInterval)
+
+	return &SensorSetup{
+		dev:     sensor,
+		reader:  sensorReader,
+		cleanup: cleanup,
+	}, nil
+}
+
 // PrintVersion exibe informações de versão formatadas
 func PrintVersion() {
 	buildInfo := GetBuildInfo()
@@ -78,56 +117,30 @@ func main() {
 		log.Fatal("Failed to create OpenWeather client:", err)
 	}
 
-	// Cria o worker OpenWeather
-	worker := NewOpenWeatherWorker(client, stationID)
-
-	// Configuração da fila usando config
-	queueConfig := cfg.QueueConfig()
-
-	// Configura graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Cria a fila para processar measurements (sem iniciar ainda)
-	q := queue.NewQueue(ctx, worker, queueConfig)
+	worker := NewOpenWeatherWorker(client, stationID)
 
-	// Cria o worker do sensor baseado na configuração
-	var (
-		sensorReader *SensorReader
-		bme280Sensor bme280.Reader
-	)
+	q := queue.NewQueue(ctx, worker, cfg.QueueConfig())
 
-	if cfg.Sensor.Type == "simulated" {
-		log.Println("Using simulated sensor data")
-		simConfig := cfg.SimulatedConfig()
-		simSensor := bme280.NewSimulatedSensor(simConfig)
-		sensorReader = NewSensorReader(simSensor, q, cfg.Sensor.ReadInterval)
-		bme280Sensor = simSensor
-	} else {
-		log.Println("Attempting to use BME280 hardware sensor")
-		sensorConfig := cfg.BME280Config()
-		sensor, err := bme280.NewSensor(sensorConfig)
-		if err != nil {
-			log.Fatalf("Failed to initialize BME280 sensor: %v", err)
-		} else {
-			log.Println("BME280 sensor initialized successfully")
-			sensorReader = NewSensorReader(sensor, q, cfg.Sensor.ReadInterval)
-			bme280Sensor = sensor
-			defer sensor.Close()
-		}
+	sensor, err := createSensorSetup(cfg, q)
+	if err != nil {
+		log.Fatalf("Failed to setup sensor: %v", err)
 	}
+	defer func() {
+		if err := sensor.cleanup(); err != nil {
+			log.Printf("Error during sensor cleanup: %v", err)
+		}
+	}()
 
-	// Cria servidor web com configuração
-	webConfig := cfg.WebConfig()
-	webServer := web.NewServer(ctx, bme280Sensor, webConfig, q)
+	webServer := web.NewServer(ctx, sensor.dev, cfg.WebConfig(), q)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// WaitGroup para aguardar todos os components terminarem
 	var wg sync.WaitGroup
 
-	// Inicia a queue em uma goroutine
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -136,16 +149,14 @@ func main() {
 		}
 	}()
 
-	// Inicia o sensor em uma goroutine
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := sensorReader.Start(ctx); err != nil && err != context.Canceled {
+		if err := sensor.reader.Start(ctx); err != nil && err != context.Canceled {
 			log.Printf("Sensor worker error: %v", err)
 		}
 	}()
 
-	// Inicia o servidor web em uma goroutine
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -154,11 +165,10 @@ func main() {
 		}
 	}()
 
-	// Aguarda sinal de shutdown
+	// Wait for shutdown
 	<-sigChan
 	log.Println("Shutdown signal received")
-
-	// Cancela o contexto principal (para sensor worker, queue e web server)
+	// Cancel the main context to signal all components to stop
 	cancel()
 
 	done := make(chan struct{})
