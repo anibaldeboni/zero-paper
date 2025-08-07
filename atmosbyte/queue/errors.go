@@ -5,6 +5,7 @@ import "errors"
 // Erros customizados
 var (
 	ErrQueueClosed        = errors.New("queue is closed")
+	ErrQueueFull          = errors.New("queue is full")
 	ErrCircuitBreakerOpen = errors.New("circuit breaker is open")
 	ErrMaxRetriesExceeded = errors.New("maximum retries exceeded")
 )

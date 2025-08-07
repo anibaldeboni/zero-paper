@@ -50,20 +50,16 @@ func (cb *CircuitBreaker) Call(fn func() error) error {
 
 // allowCall verifica se a chamada é permitida
 func (cb *CircuitBreaker) allowCall() bool {
-	cb.mu.RLock()
-	defer cb.mu.RUnlock()
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
 
 	switch cb.state {
 	case CircuitBreakerClosed:
 		return true
 	case CircuitBreakerOpen:
 		if time.Since(cb.lastFailureTime) >= cb.timeout {
-			cb.mu.RUnlock()
-			cb.mu.Lock()
 			cb.state = CircuitBreakerHalfOpen
 			cb.halfOpenSuccesses = 0
-			cb.mu.Unlock()
-			cb.mu.RLock()
 			return true
 		}
 		return false
